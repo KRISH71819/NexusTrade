@@ -1,0 +1,30 @@
+# Core API
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# Database
+pymongo[srv]>=4.12.0
+
+# Data & Finance
+yfinance>=0.2.50
+finnhub-python>=2.4.20
+pandas>=2.2.0
+numpy>=2.1.0
+ta>=0.11.0
+
+# ML
+xgboost>=3.0.0
+scikit-learn>=1.6.0
+joblib>=1.4.0
+
+# LLM
+google-genai>=1.10.0
+
+# Scheduling
+apscheduler>=3.10.0
+
+# HTTP & Utilities
+httpx>=0.28.0
+python-dotenv>=1.0.0
