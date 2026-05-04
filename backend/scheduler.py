@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from config import settings
 from config import settings
 from data_ingestion import ingest_ticker_data, bulk_screener
+from nifty_stocks import resolve_watchlist
 from ml_engine import predict_trend
 from llm_engine import analyze_sentiment
 from execution_matrix import decide_action, build_action_reason
@@ -34,7 +35,8 @@ async def run_analysis_cycle():
     logger.info("═══ Starting Analysis Cycle ═══")
     
     # 1. Bulk Screen
-    top_candidates = bulk_screener(settings.watchlist, max_results=settings.max_candidates_for_ai)
+    scan_universe = resolve_watchlist(settings.watchlist)
+    top_candidates = bulk_screener(scan_universe, max_results=settings.max_candidates_for_ai)
     logger.info(f"Stage 1 Complete. Deep Analyzing top {len(top_candidates)} candidates: {top_candidates}")
 
     results = []

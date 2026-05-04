@@ -18,6 +18,7 @@ import logging
 from config import settings
 from models import NewsItem, OHLCVBar
 from database import get_market_data_collection
+from nifty_stocks import resolve_watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -265,9 +266,17 @@ def bulk_screener(tickers: List[str], max_results: int = 10) -> List[str]:
     """
     logger.info(f"Running bulk pre-screener on {len(tickers)} tickers...")
     try:
-        df = yf.download(tickers, period="2mo", interval="1d", group_by="ticker", threads=True, progress=False)
+        df = yf.download(
+            tickers,
+            period="60d",
+            interval="1h",
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
         
         candidates = []
+        ranked = []
         for ticker in tickers:
             try:
                 t_df = df[ticker] if len(tickers) > 1 else df
@@ -288,6 +297,8 @@ def bulk_screener(tickers: List[str], max_results: int = 10) -> List[str]:
 
                 vol_ratio = current_vol / vol_sma
                 
+                ranked.append((ticker, rsi, vol_ratio))
+
                 # Rule: RSI > 50 (momentum) AND Volume spike > 1.2x average
                 if rsi > 50 and vol_ratio > 1.2:
                     candidates.append((ticker, rsi, vol_ratio))
@@ -303,8 +314,8 @@ def bulk_screener(tickers: List[str], max_results: int = 10) -> List[str]:
         if not top_tickers:
             # Fallback if no stocks meet the strict criteria today
             logger.info("No stocks met strict criteria. Falling back to top 5 by RSI.")
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            top_tickers = [c[0] for c in candidates[:5]]
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            top_tickers = [c[0] for c in ranked[:max_results]]
             if not top_tickers:
                 top_tickers = tickers[:max_results]
                 
@@ -327,38 +338,10 @@ async def ingest_ticker_data(ticker: str) -> dict:
     """
     logger.info(f"Ingesting data for {ticker}...")
 
-    # 1. Market data
-    df = fetch_ohlcv(ticker)
-    if df.empty:
-        return {"ticker": ticker, "error": "No OHLCV data available"}
-
-    # 2. Indicators
-    indicators = compute_indicators(df)
-
-    # 3. News
-    news = fetch_news(ticker)
-
-    # 4. Prepare OHLCV bars for storage
-    bars = []
-    dt_col = "datetime" if "datetime" in df.columns else df.columns[0]
-    for _, row in df.iterrows():
-        bars.append({
-            "timestamp": row[dt_col].isoformat() if hasattr(row[dt_col], "isoformat") else str(row[dt_col]),
-            "open": float(row.get("open", 0)),
-            "high": float(row.get("high", 0)),
-            "low": float(row.get("low", 0)),
-            "close": float(row.get("close", 0)),
-            "volume": int(row.get("volume", 0)),
-        })
-
-    # 5. Cache to MongoDB (graceful if DB unavailable)
-    market_doc = {
-        "ticker": ticker,
-        "bars": bars,
-        "indicators": indicators,
-        "news": [n.model_dump() for n in news],
-        "last_updated": datetime.now(timezone.utc),
-    }
+    try:
+        market_doc = build_market_data_doc(ticker)
+    except ValueError as e:
+        return {"ticker": ticker, "error": str(e)}
 
     try:
         collection = get_market_data_collection()
@@ -371,23 +354,56 @@ async def ingest_ticker_data(ticker: str) -> dict:
         logger.warning(f"Could not cache {ticker} to MongoDB: {e}")
 
     logger.info(
-        f"Ingested {ticker}: {len(bars)} bars, "
-        f"{len(indicators)} indicator groups, {len(news)} headlines"
+        f"Ingested {ticker}: {len(market_doc['bars'])} bars, "
+        f"{len(market_doc['indicators'])} indicator groups, {len(market_doc['news'])} headlines"
     )
 
     return {
         "ticker": ticker,
-        "bars_count": len(bars),
-        "latest_price": indicators.get("latest", {}).get("close"),
-        "indicators": indicators.get("latest", {}),
+        "bars_count": len(market_doc["bars"]),
+        "latest_price": market_doc["indicators"].get("latest", {}).get("close"),
+        "indicators": market_doc["indicators"].get("latest", {}),
+        "news": market_doc["news"],
+    }
+
+
+def build_market_data_doc(ticker: str) -> dict:
+    """
+    Build a full market_data-shaped document from live providers.
+    This is used both for Mongo caching and direct chart responses if Mongo is offline.
+    """
+    df = fetch_ohlcv(ticker)
+    if df.empty:
+        raise ValueError("No OHLCV data available")
+
+    indicators = compute_indicators(df)
+    news = fetch_news(ticker)
+    bars = []
+    dt_col = "datetime" if "datetime" in df.columns else df.columns[0]
+
+    for _, row in df.iterrows():
+        bars.append({
+            "timestamp": row[dt_col].isoformat() if hasattr(row[dt_col], "isoformat") else str(row[dt_col]),
+            "open": float(row.get("open", 0)),
+            "high": float(row.get("high", 0)),
+            "low": float(row.get("low", 0)),
+            "close": float(row.get("close", 0)),
+            "volume": int(row.get("volume", 0)),
+        })
+
+    return {
+        "ticker": ticker,
+        "bars": bars,
+        "indicators": indicators,
         "news": [n.model_dump() for n in news],
+        "last_updated": datetime.now(timezone.utc),
     }
 
 
 async def ingest_all_tickers() -> List[dict]:
     """Run the full ingestion pipeline for all watchlist tickers."""
     results = []
-    for ticker in settings.watchlist:
+    for ticker in resolve_watchlist(settings.watchlist):
         result = await ingest_ticker_data(ticker)
         results.append(result)
     return results

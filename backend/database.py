@@ -9,6 +9,11 @@ from config import settings
 from datetime import datetime, timezone
 import logging
 
+try:
+    import certifi
+except ImportError:  # pragma: no cover - optional runtime hardening
+    certifi = None
+
 logger = logging.getLogger(__name__)
 
 # ── Global client & DB references ────────────────────────────────────────────
@@ -19,10 +24,15 @@ _db = None
 async def connect_db():
     """Initialize the async MongoDB client and return the database."""
     global _client, _db
-    _client = AsyncMongoClient(
-        settings.mongodb_uri,
-        serverSelectionTimeoutMS=5000,
-    )
+    client_options = {
+        "serverSelectionTimeoutMS": 10000,
+        "connectTimeoutMS": 20000,
+        "socketTimeoutMS": 20000,
+    }
+    if certifi is not None:
+        client_options["tlsCAFile"] = certifi.where()
+
+    _client = AsyncMongoClient(settings.mongodb_uri, **client_options)
     _db = _client[settings.mongodb_db_name]
 
     # Verify connection with a ping
@@ -49,7 +59,7 @@ async def close_db():
     """Gracefully close the MongoDB connection."""
     global _client
     if _client:
-        _client.close()
+        await _client.close()
         logger.info("MongoDB connection closed.")
 
 

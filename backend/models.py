@@ -38,9 +38,9 @@ class Holding(BaseModel):
 # ── Portfolio ────────────────────────────────────────────────────────────────
 
 class Portfolio(BaseModel):
-    cash: float = 10_000.0
+    cash: float = 1_000_000.0
     holdings: List[Holding] = []
-    total_value: float = 10_000.0
+    total_value: float = 1_000_000.0
     total_pnl: float = 0.0
     total_pnl_pct: float = 0.0
     updated_at: datetime = Field(default_factory=datetime.utcnow)

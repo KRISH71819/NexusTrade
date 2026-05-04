@@ -3,11 +3,18 @@ Portfolio API endpoints.
 """
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 from database import get_portfolio_collection, get_portfolio_history_collection
-from ledger import get_portfolio
+from ledger import get_portfolio, reset_portfolio
 from data_ingestion import get_latest_price
+from config import settings
 
 router = APIRouter()
+
+
+class PortfolioResetRequest(BaseModel):
+    initial_balance: float = Field(default=settings.initial_balance, gt=0)
+    clear_logs: bool = True
 
 
 @router.get("/portfolio")
@@ -40,7 +47,7 @@ async def get_portfolio_state():
                 total_holdings_value += h["market_value"]
 
         total_value = portfolio["cash"] + total_holdings_value
-        initial = portfolio.get("initial_balance", 10000.0)
+        initial = portfolio.get("initial_balance", settings.initial_balance)
 
         # Remove mongo _id for JSON response
         portfolio.pop("_id", None)
@@ -56,13 +63,33 @@ async def get_portfolio_state():
 
     except Exception as e:
         return {
-            "cash": 10000.0,
+            "cash": settings.initial_balance,
             "holdings": [],
-            "total_value": 10000.0,
+            "total_value": settings.initial_balance,
             "holdings_value": 0.0,
             "total_pnl": 0.0,
             "total_pnl_pct": 0.0,
         }
+
+
+@router.post("/portfolio/reset")
+async def reset_portfolio_state(payload: PortfolioResetRequest):
+    """
+    Reset or initialize the paper portfolio to a user-defined virtual capital.
+    By default this clears trades, analysis_log, and portfolio_history so P&L restarts at 0.
+    """
+    try:
+        portfolio = await reset_portfolio(
+            initial_balance=payload.initial_balance,
+            clear_logs=payload.clear_logs,
+        )
+        return {
+            "message": "Portfolio reset",
+            "portfolio": portfolio,
+            "clear_logs": payload.clear_logs,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/portfolio/history")

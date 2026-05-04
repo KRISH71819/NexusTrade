@@ -35,10 +35,10 @@ async def get_portfolio() -> dict:
     except PyMongoError as e:
         logger.warning(f"MongoDB offline: {e}. Returning mock portfolio.")
         return {
-            "cash": 10000.0,
-            "total_value": 10000.0,
+            "cash": settings.initial_balance,
+            "total_value": settings.initial_balance,
             "holdings": [],
-            "initial_balance": 10000.0,
+            "initial_balance": settings.initial_balance,
             "total_pnl": 0.0,
             "total_pnl_pct": 0.0
         }
@@ -48,6 +48,43 @@ async def get_portfolio_value() -> float:
     """Get total portfolio value (cash + holdings)."""
     portfolio = await get_portfolio()
     return portfolio["total_value"]
+
+
+async def reset_portfolio(initial_balance: float, clear_logs: bool = True) -> dict:
+    """
+    Reset the paper-trading account to a clean starting balance.
+    This lets the dashboard/user restart the shadow portfolio at 0% profit.
+    """
+    if initial_balance <= 0:
+        raise ValueError("initial_balance must be greater than 0")
+
+    now = datetime.now(timezone.utc)
+    portfolio_doc = {
+        "_id": "main",
+        "cash": round(initial_balance, 2),
+        "holdings": [],
+        "total_value": round(initial_balance, 2),
+        "holdings_value": 0.0,
+        "total_pnl": 0.0,
+        "total_pnl_pct": 0.0,
+        "initial_balance": round(initial_balance, 2),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    collection = get_portfolio_collection()
+    await collection.replace_one({"_id": "main"}, portfolio_doc, upsert=True)
+
+    if clear_logs:
+        await get_trades_collection().delete_many({})
+        await get_analysis_collection().delete_many({})
+        await get_portfolio_history_collection().delete_many({})
+
+    await _record_snapshot(initial_balance, 0.0, initial_balance)
+    logger.info(f"Portfolio reset with starting balance Rs {initial_balance:,.2f}")
+
+    portfolio_doc.pop("_id", None)
+    return portfolio_doc
 
 
 async def get_holding(ticker: str) -> Optional[dict]:
@@ -149,6 +186,7 @@ async def execute_buy(
             portfolio_total=total_value,
         )
         await get_trades_collection().insert_one(trade_doc)
+        await _log_analysis_decision(ticker, TradeAction.BUY, analysis)
 
         # Record portfolio snapshot
         await _record_snapshot(new_cash, holdings_value, total_value)
@@ -234,6 +272,7 @@ async def execute_sell(
             portfolio_total=total_value,
         )
         await get_trades_collection().insert_one(trade_doc)
+        await _log_analysis_decision(ticker, TradeAction.SELL, analysis)
 
         # Record snapshot
         await _record_snapshot(new_cash, holdings_value, total_value)
@@ -282,6 +321,32 @@ async def log_hold(ticker: str, analysis: AnalysisResult) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 #   HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+async def _log_analysis_decision(
+    ticker: str,
+    action: TradeAction,
+    analysis: AnalysisResult,
+) -> dict:
+    """Log every AI decision, including BUY/SELL/HOLD, to analysis_log."""
+    analysis_doc = {
+        "ticker": ticker,
+        "timestamp": datetime.now(timezone.utc),
+        "action": action.value,
+        "current_price": analysis.current_price,
+        "ml_confidence": analysis.ml_confidence,
+        "ml_features_used": analysis.ml_features_used,
+        "news_headlines": analysis.news_headlines,
+        "gemini_sentiment_score": analysis.gemini_sentiment_score,
+        "gemini_explanation": analysis.gemini_explanation,
+        "action_reason": analysis.action_reason,
+    }
+    try:
+        await get_analysis_collection().insert_one(analysis_doc)
+    except PyMongoError as e:
+        logger.warning(f"Could not log {action.value} decision to MongoDB: {e}")
+
+    return analysis_doc
+
 
 def _build_trade_doc(
     ticker: str,

@@ -3,11 +3,13 @@ FastAPI application — entrypoint with lifespan, CORS, and router mounting.
 """
 
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import sys
 
+from config import settings
 from database import connect_db, close_db
 from scheduler import start_scheduler, stop_scheduler, run_analysis_cycle
 
@@ -29,10 +31,22 @@ async def lifespan(app: FastAPI):
     await connect_db()
     logger.info("Database connected and portfolio initialized.")
     start_scheduler()
+    if settings.run_analysis_on_startup:
+        asyncio.create_task(_run_startup_analysis())
     yield
     stop_scheduler()
     await close_db()
     logger.info("Shutdown complete.")
+
+
+async def _run_startup_analysis():
+    """Run one non-blocking analysis pass after startup so the dashboard fills itself."""
+    await asyncio.sleep(3)
+    try:
+        logger.info("Startup auto-analysis enabled; running first scan.")
+        await run_analysis_cycle()
+    except Exception:
+        logger.exception("Startup auto-analysis failed.")
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -47,7 +61,12 @@ app = FastAPI(
 # CORS — allow Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
