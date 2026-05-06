@@ -36,4 +36,7 @@ export const api = {
         clear_logs: clearLogs,
       }),
     }),
+  // News Intelligence
+  latestNews: () => request("/api/news/latest"),
+  tickerNews: (ticker) => request(`/api/news/${encodeURIComponent(ticker)}`),
 };

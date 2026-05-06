@@ -1,6 +1,11 @@
-"""
+﻿"""
 Virtual Trading Ledger — manages paper-trading portfolio operations.
 Every trade is logged with full AI brain transparency data.
+
+Key improvements:
+  - Uses LIVE market prices for holdings valuation (not avg_price)
+  - Tracks peak_price per holding for trailing stops
+  - Tracks portfolio peak_value for drawdown calculation
 """
 
 from datetime import datetime, timezone
@@ -39,13 +44,14 @@ async def get_portfolio() -> dict:
             "total_value": settings.initial_balance,
             "holdings": [],
             "initial_balance": settings.initial_balance,
+            "peak_value": settings.initial_balance,
             "total_pnl": 0.0,
-            "total_pnl_pct": 0.0
+            "total_pnl_pct": 0.0,
         }
 
 
 async def get_portfolio_value() -> float:
-    """Get total portfolio value (cash + holdings)."""
+    """Get total portfolio value (cash + holdings at market price)."""
     portfolio = await get_portfolio()
     return portfolio["total_value"]
 
@@ -68,6 +74,7 @@ async def reset_portfolio(initial_balance: float, clear_logs: bool = True) -> di
         "total_pnl": 0.0,
         "total_pnl_pct": 0.0,
         "initial_balance": round(initial_balance, 2),
+        "peak_value": round(initial_balance, 2),
         "created_at": now,
         "updated_at": now,
     }
@@ -96,6 +103,77 @@ async def get_holding(ticker: str) -> Optional[dict]:
     return None
 
 
+async def has_position(ticker: str) -> bool:
+    """Check if we currently hold a position in the ticker."""
+    holding = await get_holding(ticker)
+    return holding is not None and holding.get("quantity", 0) > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   PORTFOLIO VALUATION (using live prices)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def update_portfolio_valuation(live_prices: dict) -> dict:
+    """
+    Update portfolio total_value using live market prices.
+    Also updates peak_price per holding for trailing stops.
+
+    Args:
+        live_prices: {ticker: current_price} mapping
+    """
+    portfolio = await get_portfolio()
+    holdings = portfolio.get("holdings", [])
+    cash = portfolio["cash"]
+
+    holdings_value = 0.0
+    for h in holdings:
+        ticker = h["ticker"]
+        current_price = live_prices.get(ticker) or h.get("avg_price", 0)
+        qty = h.get("quantity", 0)
+
+        market_value = current_price * qty
+        holdings_value += market_value
+
+        # Update peak_price for trailing stop
+        peak = h.get("peak_price", h.get("avg_price", 0))
+        if current_price > peak:
+            h["peak_price"] = current_price
+
+    total_value = cash + holdings_value
+    initial = portfolio.get("initial_balance", settings.initial_balance)
+
+    # Update peak portfolio value
+    peak_value = portfolio.get("peak_value", initial)
+    if total_value > peak_value:
+        peak_value = total_value
+
+    try:
+        collection = get_portfolio_collection()
+        await collection.update_one(
+            {"_id": "main"},
+            {"$set": {
+                "holdings": holdings,
+                "total_value": round(total_value, 2),
+                "holdings_value": round(holdings_value, 2),
+                "peak_value": round(peak_value, 2),
+                "total_pnl": round(total_value - initial, 2),
+                "total_pnl_pct": round(
+                    ((total_value - initial) / initial) * 100, 2
+                ) if initial > 0 else 0.0,
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+    except PyMongoError as e:
+        logger.warning(f"Could not update portfolio valuation: {e}")
+
+    return {
+        "cash": cash,
+        "holdings_value": round(holdings_value, 2),
+        "total_value": round(total_value, 2),
+        "peak_value": round(peak_value, 2),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #   TRADE EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -105,6 +183,7 @@ async def execute_buy(
     price: float,
     analysis: AnalysisResult,
     quantity: Optional[int] = None,
+    max_position_pct: Optional[float] = None,
 ) -> dict:
     """
     Execute a virtual BUY order.
@@ -113,12 +192,13 @@ async def execute_buy(
     portfolio = await get_portfolio()
     cash = portfolio["cash"]
 
-    # Position sizing: max 20% of total portfolio value
-    max_spend = portfolio["total_value"] * settings.max_position_pct
+    # Position sizing
+    position_pct = max_position_pct or settings.max_position_pct
+    max_spend = portfolio["total_value"] * position_pct
     available = min(cash, max_spend)
 
     if available < price:
-        logger.warning(f"Insufficient funds to buy {ticker} at ₹{price:.2f}")
+        logger.warning(f"Insufficient funds to buy {ticker} at Rs.{price:.2f}")
         return {"error": "Insufficient funds", "ticker": ticker}
 
     if quantity is None:
@@ -146,16 +226,27 @@ async def execute_buy(
         ) / total_qty
         existing["quantity"] = total_qty
         existing["avg_price"] = round(avg_price, 2)
+        # Update peak price
+        existing["peak_price"] = max(existing.get("peak_price", 0), price)
     else:
+        from news_intelligence import get_sector
         holdings.append({
             "ticker": ticker,
             "quantity": quantity,
             "avg_price": round(price, 2),
+            "peak_price": round(price, 2),
+            "sector": get_sector(ticker),
         })
 
-    # Compute new total value
-    holdings_value = sum(h["quantity"] * h.get("avg_price", 0) for h in holdings)
+    # Compute new total value using live price for all holdings
+    holdings_value = sum(h["quantity"] * price if h["ticker"] == ticker
+                        else h["quantity"] * h.get("avg_price", 0)
+                        for h in holdings)
     total_value = new_cash + holdings_value
+    initial = portfolio.get("initial_balance", settings.initial_balance)
+
+    # Update peak
+    peak_value = max(portfolio.get("peak_value", initial), total_value)
 
     # Update portfolio in DB
     try:
@@ -166,9 +257,11 @@ async def execute_buy(
                 "cash": round(new_cash, 2),
                 "holdings": holdings,
                 "total_value": round(total_value, 2),
-                "total_pnl": round(total_value - portfolio["initial_balance"], 2),
+                "holdings_value": round(holdings_value, 2),
+                "peak_value": round(peak_value, 2),
+                "total_pnl": round(total_value - initial, 2),
                 "total_pnl_pct": round(
-                    ((total_value - portfolio["initial_balance"]) / portfolio["initial_balance"]) * 100, 2
+                    ((total_value - initial) / initial) * 100, 2
                 ),
                 "updated_at": datetime.now(timezone.utc),
             }},
@@ -198,8 +291,8 @@ async def execute_buy(
         )
 
     logger.info(
-        f"BUY {quantity}x {ticker} @ ₹{price:.2f} = ₹{total_cost:.2f} | "
-        f"Cash remaining: ₹{new_cash:.2f}"
+        f"BUY {quantity}x {ticker} @ Rs.{price:.2f} = Rs.{total_cost:.2f} | "
+        f"Cash remaining: Rs.{new_cash:.2f}"
     )
 
     return trade_doc
@@ -242,6 +335,10 @@ async def execute_sell(
     new_cash = portfolio["cash"] + total_proceeds
     holdings_value = sum(h["quantity"] * h.get("avg_price", 0) for h in holdings)
     total_value = new_cash + holdings_value
+    initial = portfolio.get("initial_balance", settings.initial_balance)
+
+    # Update peak
+    peak_value = max(portfolio.get("peak_value", initial), total_value)
 
     # Update portfolio in DB
     try:
@@ -252,9 +349,11 @@ async def execute_sell(
                 "cash": round(new_cash, 2),
                 "holdings": holdings,
                 "total_value": round(total_value, 2),
-                "total_pnl": round(total_value - portfolio["initial_balance"], 2),
+                "holdings_value": round(holdings_value, 2),
+                "peak_value": round(peak_value, 2),
+                "total_pnl": round(total_value - initial, 2),
                 "total_pnl_pct": round(
-                    ((total_value - portfolio["initial_balance"]) / portfolio["initial_balance"]) * 100, 2
+                    ((total_value - initial) / initial) * 100, 2
                 ),
                 "updated_at": datetime.now(timezone.utc),
             }},
@@ -284,8 +383,8 @@ async def execute_sell(
         )
 
     logger.info(
-        f"SELL {quantity}x {ticker} @ ₹{price:.2f} = ₹{total_proceeds:.2f} | "
-        f"Cash now: ₹{new_cash:.2f}"
+        f"SELL {quantity}x {ticker} @ Rs.{price:.2f} = Rs.{total_proceeds:.2f} | "
+        f"Cash now: Rs.{new_cash:.2f}"
     )
 
     return trade_doc
@@ -303,6 +402,9 @@ async def log_hold(ticker: str, analysis: AnalysisResult) -> dict:
         "news_headlines": analysis.news_headlines,
         "gemini_sentiment_score": analysis.gemini_sentiment_score,
         "gemini_explanation": analysis.gemini_explanation,
+        "gemini_confidence": analysis.gemini_confidence,
+        "final_score": analysis.final_score,
+        "crisis_detected": analysis.crisis_detected,
         "action_reason": analysis.action_reason,
     }
     try:
@@ -311,8 +413,9 @@ async def log_hold(ticker: str, analysis: AnalysisResult) -> dict:
         logger.warning(f"Could not log HOLD decision to MongoDB: {e}")
 
     logger.info(
-        f"HOLD {ticker} — ML: {analysis.ml_confidence:.2f}, "
-        f"Sentiment: {analysis.gemini_sentiment_score:.2f}"
+        f"HOLD {ticker} — Score: {analysis.final_score:.2f}, "
+        f"ML: {analysis.ml_confidence:.2f}, "
+        f"Gemini: {analysis.gemini_confidence:.2f}"
     )
 
     return analysis_doc
@@ -338,6 +441,10 @@ async def _log_analysis_decision(
         "news_headlines": analysis.news_headlines,
         "gemini_sentiment_score": analysis.gemini_sentiment_score,
         "gemini_explanation": analysis.gemini_explanation,
+        "gemini_confidence": analysis.gemini_confidence,
+        "gemini_risk_factors": analysis.gemini_risk_factors,
+        "final_score": analysis.final_score,
+        "crisis_detected": analysis.crisis_detected,
         "action_reason": analysis.action_reason,
     }
     try:
@@ -371,6 +478,9 @@ def _build_trade_doc(
         "news_headlines": analysis.news_headlines,
         "gemini_sentiment_score": analysis.gemini_sentiment_score,
         "gemini_explanation": analysis.gemini_explanation,
+        "gemini_confidence": analysis.gemini_confidence,
+        "final_score": analysis.final_score,
+        "crisis_detected": analysis.crisis_detected,
         "action_reason": analysis.action_reason,
         # Portfolio state after trade
         "portfolio_snapshot": {

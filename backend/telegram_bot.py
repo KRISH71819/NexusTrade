@@ -1,4 +1,4 @@
-"""
+﻿"""
 Telegram Bot — sends trade alerts with full transparency.
 Phase 2: Will send real messages after user provides bot token.
 """
@@ -30,9 +30,9 @@ async def send_trade_alert(trade: dict) -> bool:
         message = (
             f"{emoji} *{action}* — {trade['ticker']}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 Price: ₹{trade['price']:,.2f}\n"
+            f"💰 Price: Rs.{trade['price']:,.2f}\n"
             f"📦 Qty: {trade['quantity']}\n"
-            f"💵 Total: ₹{trade['total_value']:,.2f}\n"
+            f"💵 Total: Rs.{trade['total_value']:,.2f}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 ML Confidence: {trade['ml_confidence']:.0%}\n"
             f"📰 Sentiment: {trade['gemini_sentiment_score']:+.2f}\n"

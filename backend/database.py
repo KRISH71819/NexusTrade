@@ -1,4 +1,4 @@
-"""
+﻿"""
 MongoDB connection + collection initialization.
 Seeds the portfolio with starting balance on first run.
 """
@@ -146,10 +146,10 @@ async def _seed_portfolio():
         await get_portfolio_history_collection().insert_one(snapshot)
 
         logger.info(
-            f"Portfolio seeded with ₹{settings.initial_balance:,.2f} starting balance."
+            f"Portfolio seeded with Rs.{settings.initial_balance:,.2f} starting balance."
         )
     else:
         logger.info(
-            f"Portfolio exists — cash: ₹{existing['cash']:,.2f}, "
-            f"total: ₹{existing['total_value']:,.2f}"
+            f"Portfolio exists — cash: Rs.{existing['cash']:,.2f}, "
+            f"total: Rs.{existing['total_value']:,.2f}"
         )

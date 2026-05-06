@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   Brain,
   CandlestickChart,
   CircleDollarSign,
   Database,
+  Globe,
   History,
   Loader2,
   Newspaper,
   Play,
   RefreshCcw,
   Search,
+  Shield,
   ShieldCheck,
+  TrendingDown,
   Wallet,
 } from "lucide-react";
 import { api, apiBase } from "./api";
@@ -38,6 +42,7 @@ const emptyDashboard = {
   trades: [],
   watchlist: [],
   watchlistInfo: null,
+  news: null,
 };
 
 export default function App() {
@@ -113,7 +118,7 @@ export default function App() {
       }));
 
       try {
-        const [health, watchlistInfo, portfolio, portfolioHistory, analyses, trades] =
+        const [health, watchlistInfo, portfolio, portfolioHistory, analyses, trades, news] =
           await Promise.all([
             api.health(),
             api.watchlist(),
@@ -121,6 +126,7 @@ export default function App() {
             api.portfolioHistory(120),
             api.latestAnalyses(),
             api.trades(150),
+            api.latestNews().catch(() => null),
           ]);
 
         const nextDashboard = {
@@ -130,6 +136,7 @@ export default function App() {
           trades: trades?.trades || [],
           watchlist: watchlistInfo?.watchlist || [],
           watchlistInfo,
+          news,
         };
         setDashboard(nextDashboard);
         setCapitalAmount(String(nextDashboard.portfolio?.initial_balance || 1000000));
@@ -377,12 +384,28 @@ export default function App() {
             sub={`${holdings.length} open holdings`}
           />
           <MetricCard
+            icon={<Shield size={18} />}
+            label="Risk Status"
+            value={portfolio.risk_status?.buying_halted ? "HALTED" : "ACTIVE"}
+            sub={`Drawdown: ${portfolio.drawdown_pct?.toFixed(1) || '0.0'}% / ${(portfolio.risk_status?.drawdown_limit || 15).toFixed(0)}%`}
+            trend={portfolio.risk_status?.buying_halted ? -1 : 1}
+          />
+          <MetricCard
             icon={<Brain size={18} />}
             label="AI Decisions"
             value={String(dashboard.analyses.length)}
             sub={`BUY ${counts.BUY} / SELL ${counts.SELL} / HOLD ${counts.HOLD}`}
           />
         </section>
+
+        {/* Crisis Alert Banner */}
+        {dashboard.news?.crisis_alerts?.length > 0 && (
+          <div className="notice error" style={{display:'flex',gap:8,alignItems:'center'}}>
+            <AlertTriangle size={18} />
+            <strong>CRISIS ALERT:</strong>
+            <span>{dashboard.news.crisis_alerts[0].reason || 'Crisis event detected in market news'}</span>
+          </div>
+        )}
 
         <section className="terminal-grid">
           <div className="chart-panel">
@@ -395,14 +418,14 @@ export default function App() {
                 <span>Mouse wheel zoom, drag pan, crosshair OHLC, volume, SMA overlays, trade markers</span>
               </div>
               <div className="segmented">
-                {["chart", "scanner", "ledger"].map((tab) => (
+                {["chart", "scanner", "ledger", "news"].map((tab) => (
                   <button
                     className={activeTab === tab ? "active" : ""}
                     key={tab}
                     onClick={() => setActiveTab(tab)}
                     type="button"
                   >
-                    {tab}
+                    {tab === "news" ? "📰 News" : tab}
                   </button>
                 ))}
               </div>
@@ -424,6 +447,7 @@ export default function App() {
               }} />
             )}
             {activeTab === "ledger" && <TradeLedger trades={dashboard.trades} />}
+            {activeTab === "news" && <GlobalNewsPanel news={dashboard.news} />}
           </div>
 
           <aside className="brain-panel">
@@ -439,47 +463,79 @@ export default function App() {
 
             <div className="score-grid">
               <ScoreGauge
-                label="ML trend probability"
+                label="Final Score"
                 max={1}
                 min={0}
-                threshold={0.65}
+                threshold={0.60}
+                value={Number(selectedAnalysis?.final_score || 0)}
+              />
+              <ScoreGauge
+                label="Gemini Confidence"
+                max={1}
+                min={0}
+                threshold={0.60}
+                value={Number(selectedAnalysis?.gemini_confidence || 0)}
+              />
+              <ScoreGauge
+                label="ML Probability"
+                max={1}
+                min={0}
+                threshold={0.55}
                 value={Number(selectedAnalysis?.ml_confidence || 0)}
               />
               <ScoreGauge
-                label="Gemini news sentiment"
+                label="News Impact"
                 max={1}
                 min={-1}
-                threshold={0.3}
+                threshold={0.0}
                 value={Number(selectedAnalysis?.gemini_sentiment_score || 0)}
                 sentimentMode
               />
             </div>
 
+            {selectedAnalysis?.crisis_detected && (
+              <div className="matrix-cell sell" style={{marginBottom:8,padding:'8px 12px',display:'flex',gap:6,alignItems:'center'}}>
+                <AlertTriangle size={16} />
+                <strong>CRISIS MODE — trades restricted</strong>
+              </div>
+            )}
+
             <div className="pipeline">
-              <PipelineStep label="Stage 1" value="Technical pre-screen" />
-              <PipelineStep label="Stage 2A" value="XGBoost quant" />
-              <PipelineStep label="Stage 2B" value="Gemini analyst" />
-              <PipelineStep label="Decision" value="Execution matrix" />
+              <PipelineStep label="Stage 1" value="Bulk screener (RSI+Vol)" />
+              <PipelineStep label="Stage 2" value="News intelligence (3-level)" />
+              <PipelineStep label="Stage 3" value="XGBoost + LightGBM ensemble" />
+              <PipelineStep label="Stage 4" value="Gemini structured analyst" />
+              <PipelineStep label="Stage 5" value="Risk manager" />
+              <PipelineStep label="Final" value="Weighted execution matrix" />
             </div>
 
             <div className="matrix">
-              <MatrixCell tone="buy" label="BUY gate" value="ML > 65% + Sent > +0.30" />
-              <MatrixCell tone="sell" label="SELL gate" value="ML < 35% + Sent < -0.30" />
-              <MatrixCell tone="hold" label="Fallback" value="HOLD until proof is strong" />
+              <MatrixCell tone="buy" label="BUY" value={`Score ≥ 0.60 + No Crisis + Risk OK`} />
+              <MatrixCell tone="sell" label="SELL" value={`Score < 0.30 OR Crisis OR Stop-Loss`} />
+              <MatrixCell tone="hold" label="HOLD" value={`In between — wait for proof`} />
             </div>
 
             <div className="reason-box">
-              <span>Decision proof</span>
+              <span>AI Decision Proof</span>
               <p>{selectedAnalysis?.action_reason || "No analysis decision has been logged for this ticker yet."}</p>
             </div>
+
+            {selectedAnalysis?.gemini_risk_factors?.length > 0 && (
+              <div className="reason-box" style={{borderLeft:'3px solid var(--sell)'}}>
+                <span>⚠ Risk Factors</span>
+                <ul style={{margin:'4px 0',paddingLeft:16,fontSize:'0.82rem',color:'var(--text-muted)'}}>
+                  {selectedAnalysis.gemini_risk_factors.map((f, i) => <li key={i}>{f}</li>)}
+                </ul>
+              </div>
+            )}
 
             <FeatureList features={selectedAnalysis?.ml_features_used || marketData?.indicators || {}} />
           </aside>
         </section>
 
         <section className="detail-grid">
-          <NewsPanel analysis={selectedAnalysis} />
-          <HoldingsPanel holdings={holdings} cash={portfolio.cash} />
+          <NewsPanel analysis={selectedAnalysis} news={dashboard.news} ticker={selectedTicker} />
+          <HoldingsPanel holdings={holdings} cash={portfolio.cash} riskStatus={portfolio.risk_status} sectorAllocation={portfolio.sector_allocation} />
           <AuditPanel analyses={analysisHistory.length ? analysisHistory : dashboard.analyses} />
         </section>
       </main>
@@ -669,8 +725,10 @@ function TradeLedger({ trades }) {
   );
 }
 
-function NewsPanel({ analysis }) {
+function NewsPanel({ analysis, news, ticker }) {
   const headlines = analysis?.news_headlines || [];
+  const macroNews = news?.macro_news || [];
+  const tickerNewsData = news?.ticker_news?.find(t => t.ticker === ticker) || {};
 
   return (
     <article className="detail-panel">
@@ -678,35 +736,57 @@ function NewsPanel({ analysis }) {
         <div>
           <h2>
             <Newspaper size={18} />
-            News Sentiment
+            News Intelligence
           </h2>
-          <span>Headlines sent into the Gemini analyst</span>
+          <span>Multi-level: Macro → Sector → Stock</span>
         </div>
       </div>
+
+      {/* Macro News */}
+      {macroNews.length > 0 && (
+        <div className="news-list">
+          <div className="section-label" style={{display:'flex',gap:6,alignItems:'center'}}>
+            <Globe size={14} /> Global / India Macro
+          </div>
+          {macroNews.slice(0, 4).map((item, i) => (
+            <div className="news-item" key={`macro-${i}`}>
+              <strong>
+                <span style={{background:'var(--accent)',color:'var(--bg-card)',borderRadius:3,padding:'1px 5px',fontSize:'0.7rem'}}>MACRO</span>
+                {typeof item === 'string' ? item : (item.headline || 'Untitled')}
+              </strong>
+              <small>{typeof item === 'object' ? item.source || 'News' : 'Google News'}</small>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Stock Headlines */}
       <div className="news-list">
+        <div className="section-label">📈 {ticker || 'Stock'} Headlines</div>
         {headlines.length ? (
-          headlines.slice(0, 3).map((headline, index) => (
-            <div className="news-item" key={`${headline}-${index}`}>
+          headlines.slice(0, 5).map((headline, index) => (
+            <div className="news-item" key={`stock-${index}`}>
               <strong>
                 <span>{index + 1}</span>
                 {headline || "Untitled headline"}
               </strong>
-              <small>Gemini sentiment input</small>
+              <small>Gemini analysis input</small>
             </div>
           ))
         ) : (
-          <EmptyBlock title="No news headlines" text="The selected ticker has no analysis news payload yet." />
+          <EmptyBlock title="No headlines" text="Run analysis to fetch news." />
         )}
       </div>
+
       <div className="reason-box analyst">
-        <span>Gemini explanation</span>
+        <span>Gemini Structured Analysis</span>
         <p>{analysis?.gemini_explanation || "No LLM explanation has been logged yet."}</p>
       </div>
     </article>
   );
 }
 
-function HoldingsPanel({ holdings, cash }) {
+function HoldingsPanel({ holdings, cash, riskStatus, sectorAllocation }) {
   return (
     <article className="detail-panel">
       <div className="panel-title-row compact">
@@ -715,9 +795,31 @@ function HoldingsPanel({ holdings, cash }) {
             <Wallet size={18} />
             Portfolio Holdings
           </h2>
-          <span>Virtual positions from MongoDB portfolio state</span>
+          <span>Live-priced positions with risk controls</span>
         </div>
       </div>
+
+      {/* Risk Status Bar */}
+      {riskStatus && (
+        <div style={{padding:'6px 12px',fontSize:'0.78rem',display:'flex',gap:12,flexWrap:'wrap',borderBottom:'1px solid var(--border)',color:'var(--text-muted)'}}>
+          <span>Stop-Loss: <strong>{riskStatus.stop_loss_pct?.toFixed(0) || 7}%</strong></span>
+          <span>Max/Sector: <strong>{riskStatus.max_sector_stocks || 3}</strong></span>
+          <span>Drawdown: <strong className={riskStatus.buying_halted ? 'negative' : ''}>{riskStatus.drawdown_pct?.toFixed(1) || '0.0'}%</strong> / {riskStatus.drawdown_limit?.toFixed(0) || 15}%</span>
+          {riskStatus.buying_halted && <span className="action-pill sell" style={{fontSize:'0.7rem'}}>BUYING HALTED</span>}
+        </div>
+      )}
+
+      {/* Sector Allocation */}
+      {sectorAllocation && Object.keys(sectorAllocation).length > 0 && (
+        <div style={{padding:'6px 12px',fontSize:'0.78rem',display:'flex',gap:8,flexWrap:'wrap',borderBottom:'1px solid var(--border)'}}>
+          {Object.entries(sectorAllocation).map(([sector, value]) => (
+            <span key={sector} style={{background:'var(--bg-hover)',padding:'2px 8px',borderRadius:4}}>
+              {sector}: <strong>{money(value)}</strong>
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="holdings-list">
         {holdings.length ? (
           holdings.map((holding) => (
@@ -726,6 +828,7 @@ function HoldingsPanel({ holdings, cash }) {
                 <strong>{holding.ticker}</strong>
                 <small>
                   {holding.quantity} shares at avg {money(holding.avg_price)}
+                  {holding.sector && <span style={{marginLeft:6,opacity:0.6}}>• {holding.sector}</span>}
                 </small>
               </div>
               <div className="holding-values">
@@ -798,4 +901,55 @@ function EmptyBlock({ title, text }) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function GlobalNewsPanel({ news }) {
+  if (!news) return <EmptyBlock title="News not loaded" text="Run an analysis cycle to fetch global news intelligence." />;
+
+  const macroNews = news.macro_news || [];
+  const tickerNews = news.ticker_news || [];
+  const crisisAlerts = news.crisis_alerts || [];
+
+  return (
+    <div style={{padding:16,overflow:'auto',maxHeight:500}}>
+      {crisisAlerts.length > 0 && (
+        <div className="matrix-cell sell" style={{marginBottom:12,padding:'10px 14px'}}>
+          <span style={{display:'flex',gap:6,alignItems:'center'}}><AlertTriangle size={16} /> Crisis Alerts</span>
+          {crisisAlerts.map((a, i) => (
+            <strong key={i} style={{display:'block',marginTop:4}}>{a.ticker}: {a.reason}</strong>
+          ))}
+        </div>
+      )}
+
+      <div className="section-label" style={{marginBottom:8,display:'flex',gap:6,alignItems:'center'}}>
+        <Globe size={14} /> Global & India Macro News ({macroNews.length})
+      </div>
+      {macroNews.slice(0, 10).map((item, i) => (
+        <div className="news-item" key={`gnews-${i}`} style={{marginBottom:6}}>
+          <strong style={{fontSize:'0.82rem'}}>{typeof item === 'string' ? item : item.headline}</strong>
+          <small style={{opacity:0.5}}>{typeof item === 'object' ? item.source : ''}</small>
+        </div>
+      ))}
+
+      {tickerNews.length > 0 && (
+        <>
+          <div className="section-label" style={{marginTop:16,marginBottom:8}}>📊 Per-Ticker News Scores</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:8}}>
+            {tickerNews.slice(0, 12).map((t, i) => (
+              <div key={i} style={{background:'var(--bg-hover)',padding:'8px 10px',borderRadius:6,fontSize:'0.8rem'}}>
+                <strong>{t.ticker}</strong>
+                <span style={{marginLeft:6,opacity:0.6}}>{t.sector}</span>
+                <div style={{marginTop:4}}>
+                  Score: <strong className={t.overall_news_score >= 0 ? 'positive' : 'negative'}>
+                    {t.overall_news_score?.toFixed(3) || '0.000'}
+                  </strong>
+                  {t.crisis_detected && <span className="action-pill sell" style={{marginLeft:6,fontSize:'0.65rem'}}>CRISIS</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }

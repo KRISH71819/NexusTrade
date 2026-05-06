@@ -12,6 +12,7 @@ from nifty_stocks import NIFTY_STOCKS
 
 BASE_DIR = Path(__file__).resolve().parent
 
+
 class Settings(BaseSettings):
     # ── MongoDB ──────────────────────────────────────────────────────────
     mongodb_uri: str = "mongodb://localhost:27017"
@@ -20,6 +21,9 @@ class Settings(BaseSettings):
     # ── Google Gemini ────────────────────────────────────────────────────
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-pro"
+
+    # ── NewsData.io ──────────────────────────────────────────────────────
+    newsdata_api_key: str = ""
 
     # ── Finnhub (fallback news) ──────────────────────────────────────────
     finnhub_api_key: str = ""
@@ -33,8 +37,21 @@ class Settings(BaseSettings):
     initial_balance: float = 1_000_000.0
     max_position_pct: float = 0.20  # max 20% of portfolio per ticker
     watchlist: List[str] | str = NIFTY_STOCKS
-    max_candidates_for_ai: int = 10
+    max_candidates_for_ai: int = 20
     run_analysis_on_startup: bool = True
+
+    # ── Risk Management ──────────────────────────────────────────────────
+    stop_loss_pct: float = 0.07          # sell if position drops 7%
+    trailing_stop_activation_pct: float = 0.15  # activate trailing after 15% gain
+    trailing_stop_distance_pct: float = 0.10    # trailing stop at 10% from peak
+    max_drawdown_pct: float = 0.15       # halt buying if portfolio down 15%
+    max_sector_stocks: int = 3           # max holdings per sector
+
+    # ── Analysis Weights (must sum to 1.0) ───────────────────────────────
+    weight_gemini: float = 0.40
+    weight_ml: float = 0.25
+    weight_news: float = 0.20
+    weight_risk: float = 0.15
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -65,12 +82,6 @@ class Settings(BaseSettings):
     market_close_hour: int = 15
     market_close_minute: int = 30
 
-    # ── ML Thresholds ────────────────────────────────────────────────────
-    ml_buy_threshold: float = 0.65
-    ml_sell_threshold: float = 0.35
-    llm_buy_threshold: float = 0.3
-    llm_sell_threshold: float = -0.3
-
     model_config = {
         "env_file": (BASE_DIR / ".env", ".env"),
         "env_file_encoding": "utf-8",
@@ -79,4 +90,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-

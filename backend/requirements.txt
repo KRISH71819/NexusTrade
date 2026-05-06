@@ -16,11 +16,15 @@ ta>=0.11.0
 
 # ML
 xgboost>=3.0.0
+lightgbm>=4.5.0
 scikit-learn>=1.6.0
 joblib>=1.4.0
 
 # LLM
 google-genai>=1.10.0
+
+# News
+feedparser>=6.0.0
 
 # Scheduling
 apscheduler>=3.10.0

@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from database import get_portfolio_collection, get_portfolio_history_collection
 from ledger import get_portfolio, reset_portfolio
-from data_ingestion import get_latest_price
+from data_ingestion import get_batch_prices
+from news_intelligence import get_sector
 from config import settings
 
 router = APIRouter()
@@ -19,7 +20,7 @@ class PortfolioResetRequest(BaseModel):
 
 @router.get("/portfolio")
 async def get_portfolio_state():
-    """Get the current portfolio: cash, holdings, total value, P&L."""
+    """Get the current portfolio: cash, holdings with live prices, total value, P&L, risk data."""
     try:
         portfolio = await get_portfolio()
 
@@ -27,27 +28,38 @@ async def get_portfolio_state():
         holdings = portfolio.get("holdings", [])
         total_holdings_value = 0.0
 
+        # Batch fetch all live prices at once (faster than one-by-one)
+        held_tickers = [h["ticker"] for h in holdings if h.get("quantity", 0) > 0]
+        live_prices = get_batch_prices(held_tickers) if held_tickers else {}
+
+        # Compute sector allocation
+        sector_allocation = {}
+
         for h in holdings:
-            current_price = get_latest_price(h["ticker"])
-            if current_price:
-                h["current_price"] = round(current_price, 2)
-                h["market_value"] = round(current_price * h["quantity"], 2)
-                h["unrealized_pnl"] = round(
-                    (current_price - h["avg_price"]) * h["quantity"], 2
-                )
-                h["unrealized_pnl_pct"] = round(
-                    ((current_price - h["avg_price"]) / h["avg_price"]) * 100, 2
-                ) if h["avg_price"] > 0 else 0.0
-                total_holdings_value += h["market_value"]
-            else:
-                h["current_price"] = h["avg_price"]
-                h["market_value"] = round(h["avg_price"] * h["quantity"], 2)
-                h["unrealized_pnl"] = 0.0
-                h["unrealized_pnl_pct"] = 0.0
-                total_holdings_value += h["market_value"]
+            current_price = live_prices.get(h["ticker"]) or h.get("avg_price", 0)
+            h["current_price"] = round(current_price, 2)
+            h["market_value"] = round(current_price * h["quantity"], 2)
+            h["unrealized_pnl"] = round(
+                (current_price - h["avg_price"]) * h["quantity"], 2
+            )
+            h["unrealized_pnl_pct"] = round(
+                ((current_price - h["avg_price"]) / h["avg_price"]) * 100, 2
+            ) if h["avg_price"] > 0 else 0.0
+            total_holdings_value += h["market_value"]
+
+            # Sector info
+            sector = h.get("sector") or get_sector(h["ticker"])
+            h["sector"] = sector
+            sector_allocation[sector] = sector_allocation.get(sector, 0) + h["market_value"]
 
         total_value = portfolio["cash"] + total_holdings_value
         initial = portfolio.get("initial_balance", settings.initial_balance)
+        peak_value = portfolio.get("peak_value", initial)
+        if total_value > peak_value:
+            peak_value = total_value
+
+        # Compute drawdown
+        drawdown_pct = ((peak_value - total_value) / peak_value * 100) if peak_value > 0 else 0.0
 
         # Remove mongo _id for JSON response
         portfolio.pop("_id", None)
@@ -59,6 +71,16 @@ async def get_portfolio_state():
             "holdings_value": round(total_holdings_value, 2),
             "total_pnl": round(total_value - initial, 2),
             "total_pnl_pct": round(((total_value - initial) / initial) * 100, 2),
+            "peak_value": round(peak_value, 2),
+            "drawdown_pct": round(drawdown_pct, 2),
+            "sector_allocation": sector_allocation,
+            "risk_status": {
+                "drawdown_pct": round(drawdown_pct, 2),
+                "drawdown_limit": settings.max_drawdown_pct * 100,
+                "buying_halted": drawdown_pct > settings.max_drawdown_pct * 100,
+                "stop_loss_pct": settings.stop_loss_pct * 100,
+                "max_sector_stocks": settings.max_sector_stocks,
+            },
         }
 
     except Exception as e:
@@ -69,6 +91,8 @@ async def get_portfolio_state():
             "holdings_value": 0.0,
             "total_pnl": 0.0,
             "total_pnl_pct": 0.0,
+            "sector_allocation": {},
+            "risk_status": {},
         }
 
 
