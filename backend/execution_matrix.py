@@ -70,14 +70,27 @@ def decide_action(
     2. Stop-loss/trailing stop hit -> SELL
     3. Score-based decision with risk gates
     """
-    # ── Override 1: Crisis ───────────────────────────────────────────────
+    # ── Override 1: Crisis (SMART — severity-based) ────────────────────────
+    # Only hard-block on SEVERE crises (severity >= 0.7)
+    # Moderate crises just penalize the score (handled by news_impact in score)
     if crisis_detected:
-        if has_position:
-            logger.info("CRISIS OVERRIDE -> SELL (protecting existing position)")
-            return TradeAction.SELL
+        # Check if risk_assessment has crisis severity info
+        crisis_flags = [f for f in risk_assessment.risk_flags if "CRISIS" in f.upper()]
+        is_severe = len(crisis_flags) >= 2  # multiple crisis flags = severe
+
+        if is_severe:
+            if has_position:
+                logger.info("SEVERE CRISIS -> SELL (protecting position)")
+                return TradeAction.SELL
+            else:
+                logger.info("SEVERE CRISIS -> HOLD (not buying into severe crisis)")
+                return TradeAction.HOLD
         else:
-            logger.info("CRISIS OVERRIDE -> HOLD (not buying into crisis)")
-            return TradeAction.HOLD
+            # Moderate crisis: let the score decide, but log the warning
+            logger.info(
+                f"Moderate crisis detected - proceeding with score-based decision "
+                f"(score={final_score:.2f})"
+            )
 
     # ── Override 2: Stop-loss / trailing stop ────────────────────────────
     for flag in risk_assessment.risk_flags:

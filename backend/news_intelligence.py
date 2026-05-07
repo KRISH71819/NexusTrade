@@ -1,15 +1,20 @@
 """
-News Intelligence Engine — multi-level news aggregation with crisis detection.
+News Intelligence Engine — multi-level news aggregation with SMART crisis detection.
 
 Sources:
-  - Google News RSS (free, no API key) — macro + sector + stock
-  - NewsData.io (free tier, 200 req/day) — India-specific macro
-  - yfinance + Finnhub (existing) — stock-specific fallback
+  - NewsData.io (PRIMARY — works from data centers, 200 req/day free)
+  - Google News RSS (FALLBACK — may 503 from cloud servers)
 
 Levels:
-  MACRO  → global/India economy, geopolitics, wars, RBI policy
-  SECTOR → banking crisis, IT layoffs, pharma regulations
-  STOCK  → company earnings, management changes, legal issues
+  MACRO  -> global/India economy, geopolitics, RBI policy
+  SECTOR -> banking, IT layoffs, pharma regulations
+  STOCK  -> company earnings, management changes, legal issues
+
+Crisis Detection (v2):
+  - STOCK-SPECIFIC: only flags crisis if it directly impacts the stock's sector
+  - Requires 2+ crisis mentions in relevant news (not just 1 global keyword)
+  - Wars/geopolitics only flag Defence, Energy, Metals sectors
+  - Generic global conflicts do NOT block all trading
 """
 
 import asyncio
@@ -28,7 +33,7 @@ from database import get_db
 
 logger = logging.getLogger(__name__)
 
-# ── Sector mapping for Indian stocks ─────────────────────────────────────────
+# -- Sector mapping for Indian stocks ----------------------------------------
 
 SECTOR_MAP: Dict[str, str] = {
     # Banking & Finance
@@ -88,47 +93,78 @@ SECTOR_MAP: Dict[str, str] = {
     # Healthcare
     "APOLLOHOSP.NS": "Healthcare", "FORTIS.NS": "Healthcare",
     "MAXHEALTH.NS": "Healthcare", "MEDANTA.NS": "Healthcare",
+    # Misc
+    "FSL.NS": "IT", "PRINCEPIPE.NS": "Infra",
 }
 
 SECTOR_KEYWORDS: Dict[str, List[str]] = {
-    "Banking": ["banking sector india", "RBI policy rate", "bank NPA india", "credit growth india"],
-    "IT": ["IT sector india", "tech layoffs india", "software exports india", "NASSCOM"],
-    "Pharma": ["pharma sector india", "drug approval india", "FDA india pharma"],
-    "Auto": ["auto sales india", "EV india", "automobile sector india"],
-    "Energy": ["crude oil price", "energy sector india", "oil price india", "OPEC"],
-    "Metals": ["steel price india", "metal prices", "commodity metals india"],
-    "FMCG": ["FMCG india", "consumer goods india", "rural demand india"],
-    "Finance": ["NBFC india", "insurance sector india", "fintech india"],
-    "Infra": ["infrastructure india", "cement demand india", "construction india"],
-    "Realty": ["real estate india", "housing prices india", "property market india"],
-    "Telecom": ["telecom india", "5G india", "TRAI"],
-    "Consumer": ["consumer durables india", "retail sector india"],
+    "Banking": ["banking sector india", "RBI policy rate", "bank NPA india"],
+    "IT": ["IT sector india", "tech layoffs india", "software exports india"],
+    "Pharma": ["pharma sector india", "drug approval india"],
+    "Auto": ["auto sales india", "EV india"],
+    "Energy": ["crude oil price", "energy sector india", "oil price india"],
+    "Metals": ["steel price india", "metal prices"],
+    "FMCG": ["FMCG india", "consumer goods india"],
+    "Finance": ["NBFC india", "insurance sector india"],
+    "Infra": ["infrastructure india", "cement demand india"],
+    "Realty": ["real estate india", "housing prices india"],
+    "Telecom": ["telecom india", "5G india"],
+    "Consumer": ["consumer durables india"],
     "Defence": ["defence orders india", "military spending india"],
-    "Healthcare": ["hospital sector india", "healthcare india"],
+    "Healthcare": ["hospital sector india"],
 }
 
 MACRO_QUERIES = [
-    "India stock market",
-    "Indian economy",
+    "India stock market today",
+    "Indian economy news",
     "RBI monetary policy",
-    "India geopolitics",
-    "global markets crash",
-    "US Federal Reserve",
-    "crude oil price impact",
-    "India China tension",
-    "India Pakistan",
-    "global recession risk",
 ]
 
-CRISIS_KEYWORDS = [
-    "war", "military strike", "attack", "invasion", "conflict escalat",
-    "market crash", "stock market plunge", "circuit breaker", "panic sell",
-    "recession", "financial crisis", "banking collapse", "default",
-    "sanctions", "embargo", "trade war",
-    "terrorist", "bomb", "explosion",
-    "pandemic", "lockdown", "emergency",
+# -- SMART Crisis Detection (v2) -------------------------------------------
+# Instead of one big list, map crisis types to affected sectors
+# Generic geopolitical conflicts only affect Defence/Energy/Metals
+
+CRISIS_CATEGORIES = {
+    "market_wide": {
+        "keywords": [
+            "market crash", "stock market plunge", "circuit breaker triggered",
+            "panic sell", "financial crisis", "banking collapse",
+            "global recession confirmed", "india lockdown", "pandemic emergency",
+        ],
+        "affected_sectors": "ALL",  # blocks all sectors
+        "min_matches": 2,  # need 2+ keywords to trigger
+    },
+    "geopolitical": {
+        "keywords": [
+            "india pakistan war", "india china military", "nuclear threat india",
+            "india border attack", "missile strike india",
+        ],
+        "affected_sectors": ["Defence", "Energy", "Metals", "Banking"],
+        "min_matches": 1,  # direct India conflict = instant flag
+    },
+    "economic": {
+        "keywords": [
+            "RBI emergency rate", "rupee crash", "india sovereign default",
+            "india sanctions", "FII massive pullout",
+        ],
+        "affected_sectors": ["Banking", "Finance", "IT"],
+        "min_matches": 1,
+    },
+    "sector_specific": {
+        "keywords": [
+            "banking crisis india", "IT sector layoffs mass",
+            "pharma ban india", "crude oil embargo",
+        ],
+        "affected_sectors": "MATCH_KEYWORD",  # inferred from the keyword
+        "min_matches": 1,
+    },
+}
+
+# Keywords that are "background noise" — always present, should NOT trigger crisis
+NOISE_KEYWORDS = [
+    "war", "conflict", "attack", "sanctions", "military",
+    "tension", "bomb", "explosion", "terrorist",
     "coup", "martial law",
-    "nuclear", "missile",
 ]
 
 
@@ -137,43 +173,9 @@ def get_sector(ticker: str) -> str:
     return SECTOR_MAP.get(ticker, "Unknown")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#   GOOGLE NEWS RSS (free, no API key)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def _fetch_google_news_rss(query: str, max_items: int = 5) -> List[NewsItem]:
-    """Fetch news from Google News RSS feed."""
-    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-
-        feed = feedparser.parse(response.text)
-        items = []
-        for entry in feed.entries[:max_items]:
-            published = None
-            if hasattr(entry, "published_parsed") and entry.published_parsed:
-                try:
-                    published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-                except Exception:
-                    pass
-
-            items.append(NewsItem(
-                headline=entry.get("title", ""),
-                source=entry.get("source", {}).get("title", "Google News") if isinstance(entry.get("source"), dict) else "Google News",
-                url=entry.get("link", ""),
-                published_at=published,
-            ))
-        return items
-    except Exception as e:
-        logger.warning(f"Google News RSS error for '{query}': {e}")
-        return []
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#   NEWSDATA.IO (India macro news)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+#   NEWSDATA.IO (PRIMARY — works from data centers)
+# ============================================================================
 
 async def _fetch_newsdata_macro(max_items: int = 10) -> List[NewsItem]:
     """Fetch India macro news from NewsData.io free API."""
@@ -220,21 +222,126 @@ async def _fetch_newsdata_macro(max_items: int = 10) -> List[NewsItem]:
         return []
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#   CRISIS DETECTION
-# ═══════════════════════════════════════════════════════════════════════════════
+async def _fetch_newsdata_stock(ticker: str, max_items: int = 5) -> List[NewsItem]:
+    """Fetch stock-specific news from NewsData.io."""
+    if not settings.newsdata_api_key:
+        return []
 
-def detect_crisis(headlines: List[str]) -> tuple[bool, str]:
+    stock_name = ticker.replace(".NS", "").replace(".BO", "")
+    url = "https://newsdata.io/api/1/latest"
+    params = {
+        "apikey": settings.newsdata_api_key,
+        "q": stock_name,
+        "country": "in",
+        "language": "en",
+        "size": max_items,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        items = []
+        for article in data.get("results", [])[:max_items]:
+            items.append(NewsItem(
+                headline=article.get("title", ""),
+                source=article.get("source_name", "NewsData.io"),
+                url=article.get("link", ""),
+                level=NewsLevel.STOCK,
+            ))
+        return items
+    except Exception as e:
+        logger.debug(f"NewsData.io stock search error for {ticker}: {e}")
+        return []
+
+
+# ============================================================================
+#   GOOGLE NEWS RSS (FALLBACK — may 503 from data centers)
+# ============================================================================
+
+async def _fetch_google_news_rss(query: str, max_items: int = 5) -> List[NewsItem]:
+    """Fetch news from Google News RSS feed. Gracefully handles 503 blocks."""
+    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(url)
+            if response.status_code == 503:
+                logger.debug(f"Google News RSS blocked (503) for '{query}' — using NewsData.io only")
+                return []
+            response.raise_for_status()
+
+        feed = feedparser.parse(response.text)
+        items = []
+        for entry in feed.entries[:max_items]:
+            published = None
+            if hasattr(entry, "published_parsed") and entry.published_parsed:
+                try:
+                    published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                except Exception:
+                    pass
+
+            items.append(NewsItem(
+                headline=entry.get("title", ""),
+                source=entry.get("source", {}).get("title", "Google News") if isinstance(entry.get("source"), dict) else "Google News",
+                url=entry.get("link", ""),
+                published_at=published,
+            ))
+        return items
+    except Exception as e:
+        logger.debug(f"Google News RSS error for '{query}': {e}")
+        return []
+
+
+# ============================================================================
+#   SMART CRISIS DETECTION (v2)
+# ============================================================================
+
+def detect_crisis(headlines: List[str], sector: str) -> tuple:
     """
-    Scan headlines for crisis keywords.
-    Returns (crisis_detected, reason).
+    SMART crisis detection — sector-aware, threshold-based.
+
+    Returns (crisis_detected: bool, crisis_reason: str, severity: float)
+
+    Key improvements over v1:
+    - Generic wars/conflicts DON'T block all trading
+    - Only flags crisis if it directly impacts this stock's sector
+    - Requires multiple matches for market-wide events (prevents false positives)
+    - Background geopolitical noise is filtered out
     """
-    for headline in headlines:
-        lower = headline.lower()
-        for keyword in CRISIS_KEYWORDS:
-            if keyword in lower:
-                return True, f"Crisis keyword '{keyword}' detected in: {headline[:100]}"
-    return False, ""
+    if not headlines:
+        return False, "", 0.0
+
+    combined_text = " ".join(h.lower() for h in headlines)
+
+    for category_name, config in CRISIS_CATEGORIES.items():
+        matches = []
+        for keyword in config["keywords"]:
+            if keyword.lower() in combined_text:
+                matches.append(keyword)
+
+        if len(matches) < config["min_matches"]:
+            continue
+
+        # Check if this crisis affects our sector
+        affected = config["affected_sectors"]
+        if affected == "ALL":
+            severity = min(1.0, 0.3 * len(matches))
+            return True, f"Market-wide crisis: {', '.join(matches[:3])}", severity
+        elif affected == "MATCH_KEYWORD":
+            # Infer sector from keyword
+            return True, f"Sector crisis: {', '.join(matches[:3])}", 0.7
+        elif sector in affected:
+            severity = min(1.0, 0.4 * len(matches))
+            return True, f"{category_name} crisis affecting {sector}: {', '.join(matches[:3])}", severity
+        else:
+            # Crisis exists but doesn't affect this sector
+            logger.debug(
+                f"Crisis detected ({category_name}: {matches}) but {sector} sector not affected"
+            )
+
+    return False, "", 0.0
 
 
 def compute_news_score(news_items: List[NewsItem]) -> float:
@@ -253,76 +360,51 @@ def compute_news_score(news_items: List[NewsItem]) -> float:
         else:
             scores.append(0.0)
 
-    # Weight more recent news higher
     if not scores:
         return 0.0
     return sum(scores) / len(scores)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 #   MAIN PIPELINE
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 async def fetch_news_intelligence(
     ticker: str,
     stock_headlines: List[str] = None,
 ) -> NewsIntelligence:
     """
-    Full news intelligence pipeline:
-    1. Fetch macro news (Google News RSS + NewsData.io)
-    2. Fetch sector news (Google News RSS by sector)
-    3. Combine with stock-level news
-    4. Detect crises
+    Full news intelligence pipeline (deployment-friendly):
+    1. Fetch macro news (NewsData.io PRIMARY, Google RSS fallback)
+    2. Fetch stock-level news (NewsData.io)
+    3. Optionally fetch sector news (Google RSS, may fail on cloud)
+    4. SMART crisis detection (sector-aware)
     5. Compute overall news score
     """
     sector = get_sector(ticker)
 
-    # Fetch all levels concurrently
-    macro_tasks = [
-        _fetch_google_news_rss(query, max_items=3)
-        for query in MACRO_QUERIES[:4]  # limit to avoid rate limits
-    ]
-    macro_tasks.append(_fetch_newsdata_macro(max_items=8))
+    # PRIMARY: NewsData.io (works from cloud servers)
+    macro_news = await _fetch_newsdata_macro(max_items=8)
 
-    sector_tasks = []
-    if sector in SECTOR_KEYWORDS:
-        for keyword in SECTOR_KEYWORDS[sector][:2]:
-            sector_tasks.append(_fetch_google_news_rss(keyword, max_items=3))
+    # STOCK NEWS: Try NewsData.io first, then Google RSS as fallback
+    stock_news_items = await _fetch_newsdata_stock(ticker, max_items=5)
 
-    stock_task = _fetch_google_news_rss(
-        f"{ticker.replace('.NS', '')} stock NSE",
-        max_items=5,
-    )
-
-    all_results = await asyncio.gather(
-        *macro_tasks, *sector_tasks, stock_task,
-        return_exceptions=True,
-    )
-
-    # Separate results
-    macro_end = len(macro_tasks)
-    sector_end = macro_end + len(sector_tasks)
-
-    macro_news = []
-    for result in all_results[:macro_end]:
-        if isinstance(result, list):
-            for item in result:
-                item.level = NewsLevel.MACRO
-                macro_news.append(item)
-
-    sector_news = []
-    for result in all_results[macro_end:sector_end]:
-        if isinstance(result, list):
-            for item in result:
-                item.level = NewsLevel.SECTOR
-                sector_news.append(item)
-
-    stock_news_items = []
-    stock_result = all_results[-1]
-    if isinstance(stock_result, list):
-        for item in stock_result:
+    # FALLBACK: Google RSS for stock news if NewsData returned nothing
+    if not stock_news_items:
+        stock_news_items = await _fetch_google_news_rss(
+            f"{ticker.replace('.NS', '')} stock NSE",
+            max_items=5,
+        )
+        for item in stock_news_items:
             item.level = NewsLevel.STOCK
-            stock_news_items.append(item)
+
+    # SECTOR NEWS: Google RSS (optional, may fail on cloud)
+    sector_news = []
+    if sector in SECTOR_KEYWORDS:
+        keyword = SECTOR_KEYWORDS[sector][0]  # just 1 query to save rate limits
+        sector_news = await _fetch_google_news_rss(keyword, max_items=3)
+        for item in sector_news:
+            item.level = NewsLevel.SECTOR
 
     # Add any pre-fetched stock headlines
     if stock_headlines:
@@ -332,24 +414,25 @@ async def fetch_news_intelligence(
                 level=NewsLevel.STOCK,
             ))
 
-    # Deduplicate by headline similarity
+    # Deduplicate
     macro_news = _dedupe_news(macro_news)
     sector_news = _dedupe_news(sector_news)
     stock_news_items = _dedupe_news(stock_news_items)
 
-    # Crisis detection across all levels
+    # SMART crisis detection — sector-aware
     all_headlines = [n.headline for n in macro_news + sector_news + stock_news_items]
-    crisis_detected, crisis_reason = detect_crisis(all_headlines)
+    crisis_detected, crisis_reason, crisis_severity = detect_crisis(all_headlines, sector)
 
     # Mark crisis items
     if crisis_detected:
         for item in macro_news + sector_news + stock_news_items:
             lower = item.headline.lower()
-            for kw in CRISIS_KEYWORDS:
-                if kw in lower:
-                    item.sentiment = NewsSentiment.CRISIS
-                    item.impact_score = -0.9
-                    break
+            for cat_config in CRISIS_CATEGORIES.values():
+                for kw in cat_config["keywords"]:
+                    if kw.lower() in lower:
+                        item.sentiment = NewsSentiment.CRISIS
+                        item.impact_score = -0.9
+                        break
 
     overall_score = compute_news_score(macro_news + sector_news + stock_news_items)
 
@@ -379,10 +462,8 @@ async def fetch_news_intelligence(
         logger.warning(f"Could not cache news intelligence: {e}")
 
     logger.info(
-        f"News intelligence for {ticker}: "
-        f"macro={len(macro_news)}, sector={len(sector_news)}, "
-        f"stock={len(stock_news_items)}, crisis={crisis_detected}, "
-        f"score={overall_score:+.3f}"
+        f"News for {ticker}: macro={len(macro_news)}, sector={len(sector_news)}, "
+        f"stock={len(stock_news_items)}, crisis={crisis_detected}, score={overall_score:+.3f}"
     )
 
     return intelligence
@@ -411,7 +492,7 @@ def _dedupe_news(items: List[NewsItem], threshold: float = 0.7) -> List[NewsItem
 
 
 async def get_cached_news(ticker: str) -> Optional[dict]:
-    """Get cached news intelligence from MongoDB."""
+    """Get cached news intelligence from MongoDB (30-min TTL)."""
     try:
         db = get_db()
         doc = await db["news_intelligence"].find_one(

@@ -58,16 +58,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow Next.js frontend
+# CORS — allow frontend from various deployment targets
+import os
+_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://nexus-trade-gamma.vercel.app",
+]
+# Add any custom frontend URL from env
+_frontend_url = os.environ.get("FRONTEND_URL", "")
+if _frontend_url:
+    _cors_origins.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://nexus-trade-gamma.vercel.app"
-    ],
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https://.*\.hf\.space",  # all HuggingFace Spaces
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

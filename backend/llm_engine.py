@@ -1,4 +1,4 @@
-﻿"""
+"""
 LLM Engine — Gemini as the PRIMARY structured decision-maker.
 
 Instead of simple sentiment scoring, Gemini now receives:
@@ -143,17 +143,48 @@ def _analyze_sync(
     )
 
     try:
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=GeminiAnalysisResponse,
-                temperature=0.15,  # low temperature for consistent decisions
-            ),
-        )
+        import time
 
-        result = GeminiAnalysisResponse.model_validate_json(response.text)
+        max_retries = 3
+        result = None
+
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=settings.gemini_model,
+                    contents=prompt,
+                    config=genai.types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=GeminiAnalysisResponse,
+                        temperature=0.15,  # low temperature for consistent decisions
+                    ),
+                )
+                result = GeminiAnalysisResponse.model_validate_json(response.text)
+                break  # success
+
+            except Exception as retry_err:
+                err_str = str(retry_err)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    wait_time = 10 * (2 ** attempt)  # 10, 20, 40 seconds
+                    logger.warning(
+                        f"Gemini rate limited for {ticker} (attempt {attempt+1}/{max_retries}), "
+                        f"waiting {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    raise retry_err  # non-rate-limit error, don't retry
+
+        if result is None:
+            logger.error(f"Gemini exhausted all retries for {ticker}")
+            return {
+                "action": "HOLD",
+                "confidence": 0.5,
+                "position_size_pct": 0.0,
+                "risk_factors": ["Gemini rate limited after retries"],
+                "reasoning": "Gemini API rate limited. Defaulting to HOLD.",
+                "news_impact_score": 0.0,
+                "crisis_detected": False,
+            }
 
         # Clamp values to valid ranges
         confidence = max(0.0, min(1.0, result.confidence))

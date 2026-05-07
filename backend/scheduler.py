@@ -92,13 +92,17 @@ async def run_analysis_cycle():
         )
 
         # ── Step 3: Deep analysis for each ticker ────────────────────────
-        for ticker in analysis_tickers:
+        for i, ticker in enumerate(analysis_tickers):
             try:
                 result = await _analyze_single_ticker(ticker, portfolio)
                 results.append(result)
             except Exception as e:
                 logger.error(f"Error analyzing {ticker}: {e}", exc_info=True)
                 results.append({"ticker": ticker, "error": str(e)})
+
+            # Rate limit: wait 5s between tickers to avoid Gemini 429 (15 RPM free tier)
+            if i < len(analysis_tickers) - 1:
+                await asyncio.sleep(5)
 
         # ── Step 4: Update portfolio valuation with live prices ──────────
         try:
