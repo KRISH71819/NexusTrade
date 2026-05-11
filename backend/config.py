@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # ── Google Gemini ────────────────────────────────────────────────────
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-pro"
+    gemini_model: str = "gemini-2.5-flash"
 
     # ── NewsData.io ──────────────────────────────────────────────────────
     newsdata_api_key: str = ""

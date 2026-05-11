@@ -15,6 +15,9 @@ position sizing, risk factors, and detailed reasoning.
 
 import logging
 import asyncio
+import time
+import threading
+import random
 from typing import List, Dict, Optional
 from google import genai
 from pydantic import BaseModel, Field
@@ -22,6 +25,26 @@ from config import settings
 from models import GeminiDecision
 
 logger = logging.getLogger(__name__)
+
+# ── Global Rate Limiter ─────────────────────────────────────────────────────
+# Enforces a minimum interval between consecutive Gemini API calls
+# to stay safely under the free-tier RPM limit (15 RPM for pro, 30 for flash).
+_rate_lock = threading.Lock()
+_last_call_time = 0.0
+_MIN_CALL_INTERVAL = 4.0  # seconds between calls (safe for 15 RPM)
+
+
+def _rate_limit_wait():
+    """Block until enough time has passed since the last Gemini API call."""
+    global _last_call_time
+    with _rate_lock:
+        now = time.monotonic()
+        elapsed = now - _last_call_time
+        if elapsed < _MIN_CALL_INTERVAL:
+            wait = _MIN_CALL_INTERVAL - elapsed
+            logger.debug(f"Rate limiter: waiting {wait:.1f}s before next Gemini call")
+            time.sleep(wait)
+        _last_call_time = time.monotonic()
 
 
 class GeminiAnalysisResponse(BaseModel):
@@ -143,13 +166,14 @@ def _analyze_sync(
     )
 
     try:
-        import time
-
-        max_retries = 3
+        max_retries = 5
         result = None
 
         for attempt in range(max_retries):
             try:
+                # Enforce global rate limit before every API call
+                _rate_limit_wait()
+
                 response = client.models.generate_content(
                     model=settings.gemini_model,
                     contents=prompt,
@@ -160,15 +184,19 @@ def _analyze_sync(
                     ),
                 )
                 result = GeminiAnalysisResponse.model_validate_json(response.text)
+                logger.info(f"Gemini analysis succeeded for {ticker} (attempt {attempt+1})")
                 break  # success
 
             except Exception as retry_err:
                 err_str = str(retry_err)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    wait_time = 10 * (2 ** attempt)  # 10, 20, 40 seconds
+                    # Exponential backoff with jitter: 15-20s, 30-40s, 60-80s, 120-160s
+                    base_wait = 15 * (2 ** attempt)
+                    jitter = random.uniform(0, base_wait * 0.3)
+                    wait_time = base_wait + jitter
                     logger.warning(
                         f"Gemini rate limited for {ticker} (attempt {attempt+1}/{max_retries}), "
-                        f"waiting {wait_time}s..."
+                        f"waiting {wait_time:.0f}s..."
                     )
                     time.sleep(wait_time)
                 else:

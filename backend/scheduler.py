@@ -100,9 +100,9 @@ async def run_analysis_cycle():
                 logger.error(f"Error analyzing {ticker}: {e}", exc_info=True)
                 results.append({"ticker": ticker, "error": str(e)})
 
-            # Rate limit: wait 5s between tickers to avoid Gemini 429 (15 RPM free tier)
+            # Rate limit: wait 8s between tickers to avoid Gemini 429s
             if i < len(analysis_tickers) - 1:
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
 
         # ── Step 4: Update portfolio valuation with live prices ──────────
         try:
