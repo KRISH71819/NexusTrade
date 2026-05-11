@@ -47,32 +47,52 @@ logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 _analysis_running = False  # prevent concurrent runs
+_cancel_requested = False  # allows manual trigger to cancel a stuck cycle
+
+# Max tickers that get the expensive Gemini LLM call (rest use ML-only)
+_GEMINI_TIER_LIMIT = 8
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#   MAIN ANALYSIS CYCLE
+#   MAIN ANALYSIS CYCLE — TWO-TIER ARCHITECTURE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def run_analysis_cycle():
+async def run_analysis_cycle(force: bool = False):
     """
-    Full analysis cycle:
-    1. Bulk screen the watchlist for momentum candidates
-    2. Deep analyze top candidates (news + ML + Gemini + Risk)
-    3. Execute BUY/SELL/HOLD decisions
-    4. Update portfolio valuation with live prices
+    Two-tier analysis cycle:
+      FAST TIER  — All tickers get Data + News + ML (no Gemini). ~2 min total.
+      GEMINI TIER — Only the top N candidates (by ML score) + held tickers
+                    get the expensive Gemini structured analysis.
+
+    This keeps total Gemini calls to ~8 per cycle instead of ~24,
+    staying well within the free-tier RPM limits.
     """
-    global _analysis_running
+    global _analysis_running, _cancel_requested
+
     if _analysis_running:
-        logger.warning("Analysis cycle already running — skipping")
-        return {"status": "skipped", "reason": "already_running"}
+        if force:
+            logger.warning("Force-cancelling previous analysis cycle...")
+            _cancel_requested = True
+            # Wait up to 30s for the old cycle to notice and exit
+            for _ in range(30):
+                await asyncio.sleep(1)
+                if not _analysis_running:
+                    break
+            if _analysis_running:
+                logger.error("Old cycle did not stop in time — running anyway")
+                _analysis_running = False
+        else:
+            logger.warning("Analysis cycle already running — skipping")
+            return {"status": "skipped", "reason": "already_running"}
 
     _analysis_running = True
+    _cancel_requested = False
     cycle_start = datetime.now(timezone.utc)
     results = []
 
     try:
         logger.info("=" * 60)
-        logger.info("ANALYSIS CYCLE START")
+        logger.info("ANALYSIS CYCLE START (two-tier)")
         logger.info("=" * 60)
 
         # ── Step 1: Get portfolio state ──────────────────────────────────
@@ -84,27 +104,74 @@ async def run_analysis_cycle():
         watchlist = resolve_watchlist(settings.watchlist)
         top_candidates = bulk_screener(watchlist, max_results=settings.max_candidates_for_ai)
 
-        # Always include currently held stocks in the analysis
         analysis_tickers = list(set(top_candidates + held_tickers))
         logger.info(
             f"Analyzing {len(analysis_tickers)} tickers "
             f"({len(top_candidates)} screened + {len(held_tickers)} held)"
         )
 
-        # ── Step 3: Deep analysis for each ticker ────────────────────────
+        # ── Step 3: FAST TIER — ML-only pre-screen for all tickers ───────
+        fast_results = []
         for i, ticker in enumerate(analysis_tickers):
+            if _cancel_requested:
+                logger.warning("Analysis cycle cancelled by new request")
+                return {"status": "cancelled", "results": results}
+            try:
+                result = await _analyze_fast_tier(ticker, portfolio)
+                fast_results.append(result)
+            except Exception as e:
+                logger.error(f"Fast-tier error for {ticker}: {e}")
+                fast_results.append({"ticker": ticker, "ml_confidence": 0.5, "error": str(e)})
+            # Small delay to avoid hammering news APIs
+            if i < len(analysis_tickers) - 1:
+                await asyncio.sleep(1)
+
+        # ── Step 4: Select top candidates for Gemini tier ────────────────
+        # Sort by ML confidence; always include held tickers
+        fast_results.sort(key=lambda r: r.get("ml_confidence", 0), reverse=True)
+
+        gemini_tickers = set(held_tickers)  # always analyze held stocks
+        for r in fast_results:
+            if len(gemini_tickers) >= _GEMINI_TIER_LIMIT:
+                break
+            gemini_tickers.add(r["ticker"])
+
+        logger.info(
+            f"GEMINI TIER: {len(gemini_tickers)} tickers selected "
+            f"(top ML scores + {len(held_tickers)} held)"
+        )
+
+        # ── Step 5: GEMINI TIER — full analysis with LLM ────────────────
+        for i, ticker in enumerate(gemini_tickers):
+            if _cancel_requested:
+                logger.warning("Analysis cycle cancelled by new request")
+                return {"status": "cancelled", "results": results}
             try:
                 result = await _analyze_single_ticker(ticker, portfolio)
                 results.append(result)
             except Exception as e:
                 logger.error(f"Error analyzing {ticker}: {e}", exc_info=True)
                 results.append({"ticker": ticker, "error": str(e)})
+            # Rate limit: 5s between Gemini calls (rate limiter in llm_engine adds more)
+            if i < len(gemini_tickers) - 1:
+                await asyncio.sleep(5)
 
-            # Rate limit: wait 8s between tickers to avoid Gemini 429s
-            if i < len(analysis_tickers) - 1:
-                await asyncio.sleep(8)
+        # ── Step 5b: Add fast-tier HOLD results for non-Gemini tickers ───
+        for r in fast_results:
+            if r["ticker"] not in gemini_tickers and "error" not in r:
+                results.append({
+                    "ticker": r["ticker"],
+                    "action": "HOLD",
+                    "price": r.get("price", 0),
+                    "final_score": round(r.get("ml_confidence", 0.5), 3),
+                    "ml_confidence": round(r.get("ml_confidence", 0.5), 3),
+                    "gemini_confidence": 0.5,
+                    "news_impact": 0.0,
+                    "crisis": False,
+                    "tier": "fast_ml_only",
+                })
 
-        # ── Step 4: Update portfolio valuation with live prices ──────────
+        # ── Step 6: Update portfolio valuation with live prices ──────────
         try:
             held_tickers_now = [
                 h["ticker"] for h in (await get_portfolio()).get("holdings", [])
@@ -127,13 +194,15 @@ async def run_analysis_cycle():
         logger.info(
             f"ANALYSIS CYCLE COMPLETE in {elapsed:.1f}s — "
             f"BUY: {actions['BUY']}, SELL: {actions['SELL']}, "
-            f"HOLD: {actions['HOLD']}, ERRORS: {actions.get('ERROR', 0)}"
+            f"HOLD: {actions['HOLD']}, ERRORS: {actions.get('ERROR', 0)} | "
+            f"Gemini calls: {len(gemini_tickers)}/{len(analysis_tickers)} tickers"
         )
         logger.info("=" * 60)
 
         return {
             "status": "completed",
             "tickers_analyzed": len(analysis_tickers),
+            "gemini_analyzed": len(gemini_tickers),
             "actions": actions,
             "elapsed_seconds": round(elapsed, 1),
             "results": results,
@@ -145,6 +214,41 @@ async def run_analysis_cycle():
 
     finally:
         _analysis_running = False
+        _cancel_requested = False
+
+async def _analyze_fast_tier(ticker: str, portfolio: dict) -> dict:
+    """
+    FAST TIER: Data ingestion + ML prediction only (no Gemini call).
+    Returns ML confidence score for ranking tickers before Gemini tier.
+    """
+    # ── 1. Data Ingestion ────────────────────────────────────────────────
+    ingestion = await ingest_ticker_data(ticker)
+    if ingestion.get("error"):
+        return {"ticker": ticker, "ml_confidence": 0.5, "error": ingestion["error"]}
+
+    current_price = ingestion.get("latest_price")
+    if not current_price or current_price <= 0:
+        return {"ticker": ticker, "ml_confidence": 0.5, "error": "No price data"}
+
+    indicators = ingestion.get("indicators", {})
+
+    # ── 2. ML Prediction ────────────────────────────────────────────────
+    try:
+        ml_result = await predict_trend(ticker, indicators)
+    except Exception as e:
+        logger.warning(f"ML prediction failed for {ticker}: {e}")
+        ml_result = {"ml_confidence": 0.50}
+
+    ml_confidence = ml_result["ml_confidence"]
+
+    logger.debug(f"[FAST] {ticker} @ Rs{current_price:.2f} | ML: {ml_confidence:.2f}")
+
+    return {
+        "ticker": ticker,
+        "ml_confidence": ml_confidence,
+        "price": current_price,
+        "indicators": indicators,
+    }
 
 
 async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:

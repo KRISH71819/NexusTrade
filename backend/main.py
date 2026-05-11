@@ -106,8 +106,8 @@ async def health_check():
 
 @app.post("/api/trigger-analysis", tags=["System"])
 async def trigger_analysis():
-    """Manually trigger a full analysis cycle for all watchlist tickers."""
-    results = await run_analysis_cycle()
+    """Manually trigger a full analysis cycle. Force-cancels any running cycle."""
+    results = await run_analysis_cycle(force=True)
     return {
         "message": "Analysis cycle completed",
         "results": results,
