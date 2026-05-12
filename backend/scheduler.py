@@ -50,7 +50,8 @@ _analysis_running = False  # prevent concurrent runs
 _cancel_requested = False  # allows manual trigger to cancel a stuck cycle
 
 # Max tickers that get the expensive Gemini LLM call (rest use ML-only)
-_GEMINI_TIER_LIMIT = 8
+# 15 RPM free tier = we can safely do 15 Gemini calls per cycle (1 per 4.5s = ~68s total)
+_GEMINI_TIER_LIMIT = 15
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -152,9 +153,7 @@ async def run_analysis_cycle(force: bool = False):
             except Exception as e:
                 logger.error(f"Error analyzing {ticker}: {e}", exc_info=True)
                 results.append({"ticker": ticker, "error": str(e)})
-            # Rate limit: 5s between Gemini calls (rate limiter in llm_engine adds more)
-            if i < len(gemini_tickers) - 1:
-                await asyncio.sleep(5)
+            # No extra delay needed — llm_engine rate limiter enforces 4.5s between Gemini calls
 
         # ── Step 5b: Add fast-tier HOLD results for non-Gemini tickers ───
         for r in fast_results:

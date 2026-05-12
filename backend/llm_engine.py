@@ -27,11 +27,11 @@ from models import GeminiDecision
 logger = logging.getLogger(__name__)
 
 # ── Global Rate Limiter ─────────────────────────────────────────────────────
-# Enforces a minimum interval between consecutive Gemini API calls
-# to stay safely under the free-tier RPM limit (15 RPM for pro, 30 for flash).
+# gemini-2.5-flash free tier = 15 RPM → 60s / 15 = 4s between calls.
+# This enforces that minimum gap so we NEVER hit 429 in normal operation.
 _rate_lock = threading.Lock()
 _last_call_time = 0.0
-_MIN_CALL_INTERVAL = 4.0  # seconds between calls (safe for 15 RPM)
+_MIN_CALL_INTERVAL = 4.5  # 4.5s between calls (15 RPM = 4s, +0.5s safety margin)
 
 
 def _rate_limit_wait():
@@ -166,7 +166,7 @@ def _analyze_sync(
     )
 
     try:
-        max_retries = 5
+        max_retries = 2  # Only 2 retries — rate limiter prevents 429s normally
         result = None
 
         for attempt in range(max_retries):
@@ -190,13 +190,11 @@ def _analyze_sync(
             except Exception as retry_err:
                 err_str = str(retry_err)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    # Exponential backoff with jitter: 15-20s, 30-40s, 60-80s, 120-160s
-                    base_wait = 15 * (2 ** attempt)
-                    jitter = random.uniform(0, base_wait * 0.3)
-                    wait_time = base_wait + jitter
+                    # Short backoff: 8s first retry, 16s second (rate limiter handles pacing)
+                    wait_time = 8 * (2 ** attempt)  # 8s, 16s
                     logger.warning(
                         f"Gemini rate limited for {ticker} (attempt {attempt+1}/{max_retries}), "
-                        f"waiting {wait_time:.0f}s..."
+                        f"waiting {wait_time}s..."
                     )
                     time.sleep(wait_time)
                 else:
