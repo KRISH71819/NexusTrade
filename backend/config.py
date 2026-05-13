@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     max_drawdown_pct: float = 0.15       # halt buying if portfolio down 15%
     max_sector_stocks: int = 3           # max holdings per sector
 
+    # ── Underperformer Detection ─────────────────────────────────────────
+    underperformer_days: int = 5               # check performance over N days
+    underperformer_min_loss_pct: float = 0.03  # flag if losing > 3% over N days
+    underperformer_stagnant_pct: float = 0.01  # flag if moved < 1% in N days
+    profit_take_partial_pct: float = 0.25      # sell 25% of position when taking profit
+    profit_take_threshold_pct: float = 0.20    # take partial profit at 20%+ gain
+
     # ── Analysis Weights (must sum to 1.0) ───────────────────────────────
     weight_gemini: float = 0.40
     weight_ml: float = 0.25

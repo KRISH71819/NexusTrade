@@ -1,4 +1,4 @@
-﻿"""
+"""
 Risk Manager — position-level and portfolio-level risk controls.
 
 Features:
@@ -238,3 +238,205 @@ def compute_risk_adjustment(risk_assessment: RiskAssessment) -> float:
             break
 
     return max(-1.0, min(1.0, score))
+
+
+# ============================================================================
+#   UNDERPERFORMER DETECTION — sell stagnant/declining stocks
+# ============================================================================
+
+def detect_underperformers(
+    portfolio: dict,
+    current_prices: Dict[str, float],
+) -> List[dict]:
+    """
+    Detect holdings that are underperforming and should be sold.
+
+    Checks:
+    1. SLOW BLEED: Stock has been losing > 3% over the last 5 days
+       (not enough for stop-loss, but steadily declining)
+    2. STAGNANT: Stock has barely moved (< 1%) in 5 days — dead money
+       that could be better deployed elsewhere
+    3. NEGATIVE MOMENTUM: Stock is below its entry price AND has negative
+       recent trend (not recovering)
+
+    Returns list of sell signals with reason and recommended action.
+    """
+    sell_signals = []
+    holdings = portfolio.get("holdings", [])
+
+    for holding in holdings:
+        ticker = holding.get("ticker", "")
+        avg_price = holding.get("avg_price", 0)
+        quantity = holding.get("quantity", 0)
+        current_price = current_prices.get(ticker, 0)
+
+        if not current_price or not avg_price or quantity <= 0:
+            continue
+
+        # Current P&L
+        pnl_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
+
+        # Get recent price history to check trend
+        try:
+            import yfinance as yf
+            hist = yf.download(
+                ticker,
+                period=f"{settings.underperformer_days + 2}d",
+                interval="1d",
+                progress=False,
+            )
+
+            if hist.empty or len(hist) < 2:
+                continue
+
+            # Handle MultiIndex columns from yfinance
+            if hasattr(hist.columns, 'levels'):
+                close_col = hist["Close"]
+                if hasattr(close_col, 'columns'):
+                    close_col = close_col.iloc[:, 0]
+            else:
+                close_col = hist["Close"]
+
+            price_n_days_ago = float(close_col.iloc[0])
+            price_latest = float(close_col.iloc[-1])
+
+            if price_n_days_ago <= 0:
+                continue
+
+            recent_change_pct = (price_latest - price_n_days_ago) / price_n_days_ago
+
+        except Exception as e:
+            logger.debug(f"Could not fetch history for {ticker}: {e}")
+            # Fall back to just using current P&L
+            recent_change_pct = pnl_pct
+
+        # ── Check 1: SLOW BLEED ──────────────────────────────────────────
+        # Stock dropping steadily but not enough to trigger stop-loss
+        if recent_change_pct < -settings.underperformer_min_loss_pct:
+            sell_signals.append({
+                "ticker": ticker,
+                "reason": (
+                    f"SLOW BLEED: {ticker} declined {recent_change_pct:.1%} "
+                    f"over {settings.underperformer_days} days "
+                    f"(P&L: {pnl_pct:+.1%} from entry Rs.{avg_price:.2f})"
+                ),
+                "price": current_price,
+                "trigger": "underperformer_bleed",
+                "sell_all": True,  # full sell — declining stock
+                "pnl_pct": round(pnl_pct, 4),
+                "recent_change_pct": round(recent_change_pct, 4),
+            })
+            continue
+
+        # ── Check 2: STAGNANT (dead money) ───────────────────────────────
+        # Stock hasn't moved — capital is locked doing nothing
+        if (abs(recent_change_pct) < settings.underperformer_stagnant_pct
+                and pnl_pct < 0.02):  # only flag if not already profitable
+            sell_signals.append({
+                "ticker": ticker,
+                "reason": (
+                    f"STAGNANT: {ticker} moved only {recent_change_pct:+.1%} "
+                    f"in {settings.underperformer_days} days — "
+                    f"dead money (P&L: {pnl_pct:+.1%})"
+                ),
+                "price": current_price,
+                "trigger": "underperformer_stagnant",
+                "sell_all": True,  # free up capital
+                "pnl_pct": round(pnl_pct, 4),
+                "recent_change_pct": round(recent_change_pct, 4),
+            })
+            continue
+
+        # ── Check 3: NEGATIVE MOMENTUM with loss ─────────────────────────
+        # Below entry AND still dropping — not recovering
+        if pnl_pct < -0.02 and recent_change_pct < -0.005:
+            sell_signals.append({
+                "ticker": ticker,
+                "reason": (
+                    f"NEGATIVE MOMENTUM: {ticker} is {pnl_pct:+.1%} from entry "
+                    f"and still declining ({recent_change_pct:+.1%} recent). "
+                    f"Not recovering."
+                ),
+                "price": current_price,
+                "trigger": "underperformer_momentum",
+                "sell_all": True,
+                "pnl_pct": round(pnl_pct, 4),
+                "recent_change_pct": round(recent_change_pct, 4),
+            })
+
+    if sell_signals:
+        logger.info(
+            f"Underperformer scan found {len(sell_signals)} weak holdings: "
+            f"{[s['ticker'] for s in sell_signals]}"
+        )
+
+    return sell_signals
+
+
+# ============================================================================
+#   PROFIT-TAKING — partial sell on big winners to lock in gains
+# ============================================================================
+
+def check_profit_taking(
+    portfolio: dict,
+    current_prices: Dict[str, float],
+) -> List[dict]:
+    """
+    Check for holdings that have gained enough to warrant partial profit-taking.
+
+    When a stock is up 20%+ from entry, sell 25% of the position to:
+    - Lock in real gains
+    - Reduce risk exposure
+    - Free up capital for new opportunities
+
+    Only triggers ONCE per threshold crossing (tracked via peak_price).
+    """
+    sell_signals = []
+    holdings = portfolio.get("holdings", [])
+
+    for holding in holdings:
+        ticker = holding.get("ticker", "")
+        avg_price = holding.get("avg_price", 0)
+        quantity = holding.get("quantity", 0)
+        current_price = current_prices.get(ticker, 0)
+
+        if not current_price or not avg_price or quantity <= 1:
+            continue
+
+        gain_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
+
+        # Only take profit if gain exceeds threshold
+        if gain_pct >= settings.profit_take_threshold_pct:
+            # Calculate shares to sell (25% of position, minimum 1)
+            shares_to_sell = max(1, int(quantity * settings.profit_take_partial_pct))
+
+            # Don't sell everything — keep at least 1 share
+            if shares_to_sell >= quantity:
+                shares_to_sell = max(1, quantity - 1)
+
+            profit_value = shares_to_sell * current_price
+            profit_realized = shares_to_sell * (current_price - avg_price)
+
+            sell_signals.append({
+                "ticker": ticker,
+                "reason": (
+                    f"PROFIT TAKING: {ticker} up {gain_pct:.1%} "
+                    f"(Rs.{avg_price:.2f} → Rs.{current_price:.2f}). "
+                    f"Selling {shares_to_sell}/{quantity} shares to lock "
+                    f"Rs.{profit_realized:.2f} profit"
+                ),
+                "price": current_price,
+                "trigger": "profit_taking",
+                "sell_all": False,
+                "sell_quantity": shares_to_sell,
+                "pnl_pct": round(gain_pct, 4),
+                "profit_realized": round(profit_realized, 2),
+            })
+
+    if sell_signals:
+        logger.info(
+            f"Profit-taking scan found {len(sell_signals)} winners: "
+            f"{[s['ticker'] for s in sell_signals]}"
+        )
+
+    return sell_signals

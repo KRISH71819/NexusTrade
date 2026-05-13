@@ -20,6 +20,7 @@ Crisis Detection (v2):
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from urllib.parse import quote_plus
@@ -32,6 +33,41 @@ from models import NewsItem, NewsIntelligence, NewsLevel, NewsSentiment
 from database import get_db
 
 logger = logging.getLogger(__name__)
+
+# ── NewsData.io Circuit Breaker ──────────────────────────────────────────────
+# Once we get a 429, stop hitting NewsData.io for the rest of the cycle
+# (resets after 10 minutes to allow recovery between cycles)
+_newsdata_circuit_open = False
+_newsdata_circuit_opened_at = 0.0
+_NEWSDATA_CIRCUIT_COOLDOWN = 600  # 10 minutes
+
+# ── Macro News Cache (same for all tickers in a cycle) ───────────────────────
+_macro_news_cache: List = []
+_macro_news_cache_time = 0.0
+_MACRO_CACHE_TTL = 300  # 5 minutes — macro news doesn't change per-ticker
+
+
+def _is_newsdata_available() -> bool:
+    """Check if NewsData.io circuit breaker allows requests."""
+    global _newsdata_circuit_open, _newsdata_circuit_opened_at
+    if not _newsdata_circuit_open:
+        return True
+    # Check if cooldown has elapsed
+    elapsed = time.monotonic() - _newsdata_circuit_opened_at
+    if elapsed >= _NEWSDATA_CIRCUIT_COOLDOWN:
+        _newsdata_circuit_open = False
+        logger.info("NewsData.io circuit breaker reset — retrying requests")
+        return True
+    return False
+
+
+def _trip_newsdata_circuit():
+    """Open the circuit breaker after a 429."""
+    global _newsdata_circuit_open, _newsdata_circuit_opened_at
+    if not _newsdata_circuit_open:
+        _newsdata_circuit_open = True
+        _newsdata_circuit_opened_at = time.monotonic()
+        logger.warning("NewsData.io circuit breaker OPEN — skipping for 10 minutes")
 
 # -- Sector mapping for Indian stocks ----------------------------------------
 
@@ -178,9 +214,15 @@ def get_sector(ticker: str) -> str:
 # ============================================================================
 
 async def _fetch_newsdata_macro(max_items: int = 10) -> List[NewsItem]:
-    """Fetch India macro news from NewsData.io free API."""
-    if not settings.newsdata_api_key:
-        logger.warning("NewsData.io API key not configured")
+    """Fetch India macro news from NewsData.io free API (cached per cycle)."""
+    global _macro_news_cache, _macro_news_cache_time
+
+    # Return cached macro news if fresh (same for every ticker)
+    if _macro_news_cache and (time.monotonic() - _macro_news_cache_time) < _MACRO_CACHE_TTL:
+        logger.debug(f"Using cached macro news ({len(_macro_news_cache)} items)")
+        return list(_macro_news_cache)
+
+    if not settings.newsdata_api_key or not _is_newsdata_available():
         return []
 
     url = "https://newsdata.io/api/1/latest"
@@ -195,6 +237,9 @@ async def _fetch_newsdata_macro(max_items: int = 10) -> List[NewsItem]:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, params=params)
+            if response.status_code == 429:
+                _trip_newsdata_circuit()
+                return []
             response.raise_for_status()
             data = response.json()
 
@@ -215,16 +260,23 @@ async def _fetch_newsdata_macro(max_items: int = 10) -> List[NewsItem]:
                 published_at=published,
                 level=NewsLevel.MACRO,
             ))
-        logger.info(f"Fetched {len(items)} macro headlines from NewsData.io")
+
+        # Cache the result for the entire cycle
+        _macro_news_cache = items
+        _macro_news_cache_time = time.monotonic()
+        logger.info(f"Fetched {len(items)} macro headlines from NewsData.io (cached)")
         return items
     except Exception as e:
-        logger.warning(f"NewsData.io error: {e}")
+        if "429" in str(e):
+            _trip_newsdata_circuit()
+        else:
+            logger.warning(f"NewsData.io error: {e}")
         return []
 
 
 async def _fetch_newsdata_stock(ticker: str, max_items: int = 5) -> List[NewsItem]:
-    """Fetch stock-specific news from NewsData.io."""
-    if not settings.newsdata_api_key:
+    """Fetch stock-specific news from NewsData.io (with circuit breaker)."""
+    if not settings.newsdata_api_key or not _is_newsdata_available():
         return []
 
     stock_name = ticker.replace(".NS", "").replace(".BO", "")
@@ -240,6 +292,9 @@ async def _fetch_newsdata_stock(ticker: str, max_items: int = 5) -> List[NewsIte
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url, params=params)
+            if response.status_code == 429:
+                _trip_newsdata_circuit()
+                return []
             response.raise_for_status()
             data = response.json()
 
@@ -253,7 +308,10 @@ async def _fetch_newsdata_stock(ticker: str, max_items: int = 5) -> List[NewsIte
             ))
         return items
     except Exception as e:
-        logger.debug(f"NewsData.io stock search error for {ticker}: {e}")
+        if "429" in str(e):
+            _trip_newsdata_circuit()
+        else:
+            logger.debug(f"NewsData.io stock search error for {ticker}: {e}")
         return []
 
 

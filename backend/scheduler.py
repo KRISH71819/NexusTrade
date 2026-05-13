@@ -26,7 +26,13 @@ from data_ingestion import (
 from news_intelligence import fetch_news_intelligence, get_sector
 from ml_engine import predict_trend
 from llm_engine import analyze_with_gemini
-from risk_manager import assess_risk, check_stop_losses, compute_risk_adjustment
+from risk_manager import (
+    assess_risk,
+    check_stop_losses,
+    compute_risk_adjustment,
+    detect_underperformers,
+    check_profit_taking,
+)
 from execution_matrix import (
     compute_final_score,
     decide_action,
@@ -384,8 +390,10 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
 
 async def run_risk_check():
     """
-    Quick risk scan: check all holdings for stop-loss and trailing stop triggers.
-    This runs more frequently than the full analysis cycle.
+    Comprehensive risk scan — runs every 30 minutes:
+      1. Stop-loss / trailing stop checks (instant sell on breach)
+      2. Underperformer detection (sell stagnant/declining stocks)
+      3. Profit-taking (partial sell on big winners to lock gains)
     """
     try:
         portfolio = await get_portfolio()
@@ -398,20 +406,21 @@ async def run_risk_check():
         if not held_tickers:
             return
 
-        # Fetch live prices
+        # Fetch live prices for all holdings
         live_prices = get_batch_prices(held_tickers)
 
-        # Update valuation
+        # Update valuation with live prices
         await update_portfolio_valuation(live_prices)
 
-        # Check stop-losses
-        sell_signals = check_stop_losses(portfolio, live_prices)
+        total_sells = 0
 
-        for signal in sell_signals:
+        # ── 1. Stop-Loss / Trailing Stop (hard rules — execute immediately) ──
+        stop_signals = check_stop_losses(portfolio, live_prices)
+
+        for signal in stop_signals:
             ticker = signal["ticker"]
             logger.warning(f"RISK ALERT: {signal['reason']}")
 
-            # Execute forced sell
             analysis = AnalysisResult(
                 ticker=ticker,
                 current_price=signal["price"],
@@ -426,9 +435,95 @@ async def run_risk_check():
             trade = await execute_sell(ticker, signal["price"], analysis)
             if "error" not in trade:
                 asyncio.create_task(send_trade_alert(trade))
+                total_sells += 1
 
-        if sell_signals:
-            logger.info(f"Risk check triggered {len(sell_signals)} forced sells")
+        # ── 2. Underperformer Detection (sell weak stocks) ───────────────────
+        # Re-fetch portfolio after potential stop-loss sells
+        if stop_signals:
+            portfolio = await get_portfolio()
+
+        underperformer_signals = detect_underperformers(portfolio, live_prices)
+
+        for signal in underperformer_signals:
+            ticker = signal["ticker"]
+            # Skip if already sold by stop-loss above
+            if ticker in [s["ticker"] for s in stop_signals]:
+                continue
+
+            logger.warning(f"UNDERPERFORMER: {signal['reason']}")
+
+            analysis = AnalysisResult(
+                ticker=ticker,
+                current_price=signal["price"],
+                ml_confidence=0.0,
+                gemini_sentiment_score=-0.5,
+                gemini_explanation=signal["reason"],
+                gemini_confidence=0.0,
+                final_score=0.1,
+                action=TradeAction.SELL,
+                action_reason=signal["reason"],
+            )
+
+            if signal.get("sell_all", True):
+                trade = await execute_sell(ticker, signal["price"], analysis)
+            else:
+                trade = await execute_sell(
+                    ticker, signal["price"], analysis,
+                    quantity=signal.get("sell_quantity"),
+                )
+
+            if "error" not in trade:
+                asyncio.create_task(send_trade_alert(trade))
+                total_sells += 1
+
+        # ── 3. Profit-Taking (partial sell on winners) ───────────────────────
+        if underperformer_signals:
+            portfolio = await get_portfolio()
+
+        profit_signals = check_profit_taking(portfolio, live_prices)
+
+        for signal in profit_signals:
+            ticker = signal["ticker"]
+            # Skip if already handled above
+            sold_tickers = (
+                [s["ticker"] for s in stop_signals] +
+                [s["ticker"] for s in underperformer_signals]
+            )
+            if ticker in sold_tickers:
+                continue
+
+            logger.info(f"PROFIT TAKING: {signal['reason']}")
+
+            analysis = AnalysisResult(
+                ticker=ticker,
+                current_price=signal["price"],
+                ml_confidence=0.5,
+                gemini_sentiment_score=0.5,
+                gemini_explanation=signal["reason"],
+                gemini_confidence=0.5,
+                final_score=0.5,
+                action=TradeAction.SELL,
+                action_reason=signal["reason"],
+            )
+
+            trade = await execute_sell(
+                ticker, signal["price"], analysis,
+                quantity=signal.get("sell_quantity"),
+            )
+            if "error" not in trade:
+                asyncio.create_task(send_trade_alert(trade))
+                total_sells += 1
+
+        # ── Summary ──────────────────────────────────────────────────────────
+        if total_sells > 0:
+            logger.info(
+                f"Risk check complete: {total_sells} sell(s) executed — "
+                f"stop-loss: {len(stop_signals)}, "
+                f"underperformers: {len(underperformer_signals)}, "
+                f"profit-taking: {len(profit_signals)}"
+            )
+        else:
+            logger.debug("Risk check complete: all holdings healthy")
 
     except Exception as e:
         logger.error(f"Risk check failed: {e}", exc_info=True)
