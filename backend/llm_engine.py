@@ -1,7 +1,11 @@
 """
-LLM Engine — Gemini as the PRIMARY structured decision-maker.
+LLM Engine — Gemma 4 31B as the PRIMARY structured decision-maker.
 
-Instead of simple sentiment scoring, Gemini now receives:
+Uses Gemma 4 31B (1,500 RPD / 15 RPM / Unlimited TPM) for high-volume
+structured financial analysis.  Falls back to Gemini 3.1 Flash Lite
+(500 RPD) if the primary model errors out.
+
+Receives:
   1. Macro news (global + India economy)
   2. Sector news
   3. Stock-specific news
@@ -17,7 +21,7 @@ import logging
 import asyncio
 import time
 import threading
-import random
+from datetime import date
 from typing import List, Dict, Optional
 from google import genai
 from pydantic import BaseModel, Field
@@ -27,22 +31,54 @@ from models import GeminiDecision
 logger = logging.getLogger(__name__)
 
 # ── Global Rate Limiter ─────────────────────────────────────────────────────
-# gemini-2.5-flash free tier = 15 RPM → 60s / 15 = 4s between calls.
-# This enforces that minimum gap so we NEVER hit 429 in normal operation.
+# Gemma 4 31B free tier = 15 RPM → 60s / 15 = 4s between calls.
+# We use 4.2s (extra 0.2s margin) so we NEVER hit 429 in normal operation.
 _rate_lock = threading.Lock()
 _last_call_time = 0.0
-_MIN_CALL_INTERVAL = 4.5  # 4.5s between calls (15 RPM = 4s, +0.5s safety margin)
+_MIN_CALL_INTERVAL = 4.2  # 15 RPM = 4s minimum, +0.2s safety margin
+
+# ── Daily Call Counter (for monitoring, NOT a hard limit) ────────────────────
+_daily_counter_lock = threading.Lock()
+_daily_calls = 0
+_daily_calls_date = date.today()
+
+
+def _increment_daily_counter() -> int:
+    """Increment and return the daily call count. Resets at midnight."""
+    global _daily_calls, _daily_calls_date
+    with _daily_counter_lock:
+        today = date.today()
+        if today != _daily_calls_date:
+            logger.info(f"Daily counter reset (was {_daily_calls} calls on {_daily_calls_date})")
+            _daily_calls = 0
+            _daily_calls_date = today
+        _daily_calls += 1
+        return _daily_calls
+
+
+def get_daily_budget_status() -> dict:
+    """Return current daily API usage stats for monitoring."""
+    with _daily_counter_lock:
+        today = date.today()
+        calls = _daily_calls if today == _daily_calls_date else 0
+    return {
+        "calls_today": calls,
+        "daily_limit": 1500,  # Gemma 4 31B free tier RPD
+        "remaining": max(0, 1500 - calls),
+        "model": settings.gemini_model,
+        "date": str(today),
+    }
 
 
 def _rate_limit_wait():
-    """Block until enough time has passed since the last Gemini API call."""
+    """Block until enough time has passed since the last API call."""
     global _last_call_time
     with _rate_lock:
         now = time.monotonic()
         elapsed = now - _last_call_time
         if elapsed < _MIN_CALL_INTERVAL:
             wait = _MIN_CALL_INTERVAL - elapsed
-            logger.debug(f"Rate limiter: waiting {wait:.1f}s before next Gemini call")
+            logger.debug(f"Rate limiter: waiting {wait:.1f}s before next API call")
             time.sleep(wait)
         _last_call_time = time.monotonic()
 
@@ -154,10 +190,10 @@ def _analyze_sync(
     portfolio_state: Dict,
     risk_info: Dict,
 ) -> dict:
-    """Synchronous Gemini API call for structured analysis."""
+    """Synchronous API call with primary model + fallback cascade."""
     client = _get_client()
     if not client:
-        logger.warning("Gemini API key not configured. Returning neutral decision.")
+        logger.warning("API key not configured. Returning neutral decision.")
         return GeminiDecision().model_dump()
 
     prompt = _build_analysis_prompt(
@@ -165,79 +201,94 @@ def _analyze_sync(
         sector_news, stock_news, portfolio_state, risk_info,
     )
 
-    try:
-        max_retries = 2  # Only 2 retries — rate limiter prevents 429s normally
-        result = None
+    # Try primary model (Gemma 4 31B), then fallback (Gemini 3.1 Flash Lite)
+    models_to_try = [settings.gemini_model]
+    if settings.gemini_fallback_model:
+        models_to_try.append(settings.gemini_fallback_model)
 
-        for attempt in range(max_retries):
-            try:
-                # Enforce global rate limit before every API call
-                _rate_limit_wait()
+    for model_name in models_to_try:
+        result = _try_model(client, model_name, prompt, ticker)
+        if result is not None:
+            return result
 
-                response = client.models.generate_content(
-                    model=settings.gemini_model,
-                    contents=prompt,
-                    config=genai.types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=GeminiAnalysisResponse,
-                        temperature=0.15,  # low temperature for consistent decisions
-                    ),
-                )
-                result = GeminiAnalysisResponse.model_validate_json(response.text)
-                logger.info(f"Gemini analysis succeeded for {ticker} (attempt {attempt+1})")
-                break  # success
+    # All models failed
+    logger.error(f"All models exhausted for {ticker}")
+    return {
+        "action": "HOLD",
+        "confidence": 0.5,
+        "position_size_pct": 0.0,
+        "risk_factors": ["All LLM models failed after retries"],
+        "reasoning": "LLM API unavailable. Defaulting to HOLD.",
+        "news_impact_score": 0.0,
+        "crisis_detected": False,
+    }
 
-            except Exception as retry_err:
-                err_str = str(retry_err)
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    # Short backoff: 8s first retry, 16s second (rate limiter handles pacing)
-                    wait_time = 8 * (2 ** attempt)  # 8s, 16s
-                    logger.warning(
-                        f"Gemini rate limited for {ticker} (attempt {attempt+1}/{max_retries}), "
-                        f"waiting {wait_time}s..."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    raise retry_err  # non-rate-limit error, don't retry
 
-        if result is None:
-            logger.error(f"Gemini exhausted all retries for {ticker}")
+def _try_model(client, model_name: str, prompt: str, ticker: str) -> Optional[dict]:
+    """Try a specific model with retries. Returns parsed result or None."""
+    max_retries = 3
+    is_primary = (model_name == settings.gemini_model)
+
+    for attempt in range(max_retries):
+        try:
+            _rate_limit_wait()
+            count = _increment_daily_counter()
+
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=genai.types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=GeminiAnalysisResponse,
+                    temperature=0.15,
+                ),
+            )
+            result = GeminiAnalysisResponse.model_validate_json(response.text)
+            logger.info(
+                f"LLM analysis succeeded for {ticker} | "
+                f"model={model_name} attempt={attempt+1} | "
+                f"daily_calls={count}/1500"
+            )
+
+            # Clamp values to valid ranges
+            confidence = max(0.0, min(1.0, result.confidence))
+            position_size = max(0.0, min(settings.max_position_pct, result.position_size_pct))
+            news_impact = max(-1.0, min(1.0, result.news_impact_score))
+
             return {
-                "action": "HOLD",
-                "confidence": 0.5,
-                "position_size_pct": 0.0,
-                "risk_factors": ["Gemini rate limited after retries"],
-                "reasoning": "Gemini API rate limited. Defaulting to HOLD.",
-                "news_impact_score": 0.0,
-                "crisis_detected": False,
+                "action": result.action.upper() if result.action else "HOLD",
+                "confidence": confidence,
+                "position_size_pct": position_size,
+                "risk_factors": result.risk_factors or [],
+                "reasoning": result.reasoning or "",
+                "news_impact_score": news_impact,
+                "crisis_detected": result.crisis_detected,
             }
 
-        # Clamp values to valid ranges
-        confidence = max(0.0, min(1.0, result.confidence))
-        position_size = max(0.0, min(settings.max_position_pct, result.position_size_pct))
-        news_impact = max(-1.0, min(1.0, result.news_impact_score))
+        except Exception as retry_err:
+            err_str = str(retry_err)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                wait_time = 6 * (2 ** attempt)  # 6s, 12s, 24s
+                logger.warning(
+                    f"Rate limited on {model_name} for {ticker} "
+                    f"(attempt {attempt+1}/{max_retries}), waiting {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            else:
+                logger.warning(
+                    f"Model {model_name} error for {ticker} "
+                    f"(attempt {attempt+1}): {err_str[:150]}"
+                )
+                if not is_primary:
+                    return None  # Don't waste retries on fallback for non-429 errors
+                break  # Try fallback model
 
-        return {
-            "action": result.action.upper() if result.action else "HOLD",
-            "confidence": confidence,
-            "position_size_pct": position_size,
-            "risk_factors": result.risk_factors or [],
-            "reasoning": result.reasoning or "",
-            "news_impact_score": news_impact,
-            "crisis_detected": result.crisis_detected,
-        }
+    # This model failed all retries
+    label = "Primary" if is_primary else "Fallback"
+    logger.warning(f"{label} model {model_name} failed for {ticker} after {max_retries} attempts")
+    return None
 
-    except Exception as e:
-        logger.error(f"Gemini API error for {ticker}: {e}")
-        return {
-            "action": "HOLD",
-            "confidence": 0.5,
-            "position_size_pct": 0.0,
-            "risk_factors": [f"Gemini API error: {str(e)[:100]}"],
-            "reasoning": f"Unable to analyze due to API error: {str(e)[:200]}",
-            "news_impact_score": 0.0,
-            "crisis_detected": False,
-        }
+
 
 
 async def analyze_with_gemini(
@@ -250,12 +301,17 @@ async def analyze_with_gemini(
     risk_info: Dict,
 ) -> dict:
     """
-    Full Gemini structured analysis — the PRIMARY decision-maker.
+    Full LLM structured analysis — the PRIMARY decision-maker.
 
-    Returns a GeminiDecision dict with action, confidence,
+    Uses Gemma 4 31B (primary) with Gemini 3.1 Flash Lite fallback.
+    Returns a decision dict with action, confidence,
     position sizing, risk factors, and reasoning.
     """
-    logger.info(f"Running Gemini structured analysis for {ticker}")
+    budget = get_daily_budget_status()
+    logger.info(
+        f"Running LLM analysis for {ticker} | "
+        f"budget: {budget['calls_today']}/{budget['daily_limit']} used"
+    )
     return await asyncio.to_thread(
         _analyze_sync,
         ticker, technical_snapshot, macro_news,

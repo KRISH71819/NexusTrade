@@ -20,7 +20,8 @@ class Settings(BaseSettings):
 
     # ── Google Gemini ────────────────────────────────────────────────────
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemma-4-31b-it"
+    gemini_fallback_model: str = "gemini-3.1-flash-lite"
 
     # ── NewsData.io ──────────────────────────────────────────────────────
     newsdata_api_key: str = ""
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     initial_balance: float = 1_000_000.0
     max_position_pct: float = 0.20  # max 20% of portfolio per ticker
     watchlist: List[str] | str = NIFTY_STOCKS
-    max_candidates_for_ai: int = 20
+    max_candidates_for_ai: int = 40
     run_analysis_on_startup: bool = True
 
     # ── Risk Management ──────────────────────────────────────────────────
