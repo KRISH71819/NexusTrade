@@ -1,6 +1,5 @@
-﻿"""
+"""
 Telegram Bot — sends trade alerts with full transparency.
-Phase 2: Will send real messages after user provides bot token.
 """
 
 import httpx
@@ -11,6 +10,19 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
+# ── Startup validation ──────────────────────────────────────────────────────
+if settings.telegram_bot_token and settings.telegram_chat_id:
+    logger.info(
+        f"Telegram configured — bot token: ...{settings.telegram_bot_token[-6:]}, "
+        f"chat_id: {settings.telegram_chat_id}"
+    )
+else:
+    logger.warning(
+        "Telegram NOT configured — "
+        f"bot_token={'SET' if settings.telegram_bot_token else 'MISSING'}, "
+        f"chat_id={'SET' if settings.telegram_chat_id else 'MISSING'}"
+    )
+
 
 async def send_trade_alert(trade: dict) -> bool:
     """
@@ -20,7 +32,7 @@ async def send_trade_alert(trade: dict) -> bool:
     Gemini sentiment, and a link to the dashboard.
     """
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
-        logger.warning("Telegram not configured — skipping alert")
+        logger.debug("Telegram not configured — skipping alert")
         return False
 
     try:
@@ -41,7 +53,7 @@ async def send_trade_alert(trade: dict) -> bool:
         )
 
         url = TELEGRAM_API.format(token=settings.telegram_bot_token)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(url, json={
                 "chat_id": settings.telegram_chat_id,
                 "text": message,
@@ -53,9 +65,15 @@ async def send_trade_alert(trade: dict) -> bool:
             logger.info(f"Telegram alert sent: {action} {trade['ticker']}")
             return True
         else:
-            logger.error(f"Telegram API error: {response.status_code} — {response.text}")
+            logger.error(
+                f"Telegram API error {response.status_code}: {response.text[:200]}"
+            )
             return False
 
-    except Exception as e:
-        logger.error(f"Failed to send Telegram alert: {e}")
+    except httpx.TimeoutException:
+        logger.error("Telegram alert timed out (10s)")
         return False
+    except Exception as e:
+        logger.error(f"Failed to send Telegram alert: {type(e).__name__}: {e}")
+        return False
+

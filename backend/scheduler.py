@@ -149,6 +149,15 @@ async def run_analysis_cycle(force: bool = False):
                 results.append({"ticker": ticker, "error": str(e)})
             # llm_engine rate limiter enforces 4.2s between calls automatically
 
+        # ── Step 3.5: Portfolio Rotation (Smart Stock Upgrade) ────────────
+        # Compare candidate scores vs held scores — swap if clearly better
+        try:
+            rotation_count = await _run_portfolio_rotation(results)
+            if rotation_count > 0:
+                logger.info(f"PORTFOLIO ROTATION: {rotation_count} swap(s) executed")
+        except Exception as e:
+            logger.warning(f"Portfolio rotation failed: {e}", exc_info=True)
+
         # ── Step 4: Update portfolio valuation with live prices ──────────
         try:
             held_tickers_now = [
@@ -163,7 +172,7 @@ async def run_analysis_cycle(force: bool = False):
             logger.warning(f"Could not update portfolio valuation: {e}")
 
         # ── Summary ──────────────────────────────────────────────────────
-        actions = {"BUY": 0, "SELL": 0, "HOLD": 0, "ERROR": 0}
+        actions = {"BUY": 0, "SELL": 0, "HOLD": 0, "SKIP": 0, "ERROR": 0}
         for r in results:
             action = r.get("action", "ERROR")
             actions[action] = actions.get(action, 0) + 1
@@ -173,8 +182,9 @@ async def run_analysis_cycle(force: bool = False):
         logger.info(
             f"ANALYSIS CYCLE COMPLETE in {elapsed:.1f}s — "
             f"BUY: {actions['BUY']}, SELL: {actions['SELL']}, "
-            f"HOLD: {actions['HOLD']}, ERRORS: {actions.get('ERROR', 0)} | "
-            f"LLM calls this cycle: {len(ordered_tickers)} | "
+            f"HOLD: {actions['HOLD']}, SKIP: {actions.get('SKIP', 0)}, "
+            f"ERRORS: {actions.get('ERROR', 0)} | "
+            f"LLM calls this cycle: {len(ordered_tickers) - actions.get('SKIP', 0)} | "
             f"Daily budget: {budget_after['calls_today']}/{budget_after['daily_limit']}"
         )
         logger.info("=" * 60)
@@ -246,6 +256,26 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
         ml_result = {"ml_confidence": 0.50, "features_used": {}, "model_info": {"status": "error"}}
 
     ml_confidence = ml_result["ml_confidence"]
+
+    # ── GATE: Skip stocks with insufficient ML data ──────────────────
+    # If ML engine couldn't build a reliable model due to missing data,
+    # do NOT waste an LLM call or buy this stock blindly.
+    ml_status = ml_result.get("model_info", {}).get("status", "")
+    if ml_status in ("insufficient_data", "insufficient_clean_data", "insufficient_training_data"):
+        is_holding = await has_position(ticker)
+        if not is_holding:
+            logger.warning(
+                f"SKIPPING {ticker} — ML has {ml_status} "
+                f"(not enough bars for reliable prediction). "
+                f"Will NOT call LLM or buy."
+            )
+            return {
+                "ticker": ticker,
+                "action": "SKIP",
+                "reason": ml_status,
+                "price": current_price,
+            }
+        # If we already HOLD it, continue to LLM so we can decide SELL/HOLD
 
     # ── 4. Gemini Structured Analysis ────────────────────────────────────
     sector = get_sector(ticker)
@@ -390,6 +420,208 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
         "news_impact": round(news_impact_score, 3),
         "crisis": crisis_detected,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   PORTFOLIO ROTATION — Smart Stock Upgrade Engine
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _run_portfolio_rotation(cycle_results: list) -> int:
+    """
+    Compare unbought candidate scores against held stock scores.
+    If a candidate is significantly stronger, sell the weaker holding
+    and buy the stronger stock.
+
+    Rules:
+      - Only rotate stocks held for at least `rotation_min_hold_hours`
+      - Candidate must beat held stock by at least `rotation_min_score_gap`
+      - Score gap >= 0.25 → full sell & replace
+      - Score gap 0.15-0.25 → sell 50% and buy replacement
+      - Uses scores already computed this cycle (zero extra API calls)
+
+    Returns number of swaps executed.
+    """
+    portfolio = await get_portfolio()
+    holdings = portfolio.get("holdings", [])
+
+    if not holdings:
+        return 0
+
+    # Build score maps from this cycle's results
+    # Candidates = scored stocks we did NOT buy (HOLD decisions on non-held tickers)
+    candidate_scores = {}
+    held_scores = {}
+
+    for r in cycle_results:
+        ticker = r.get("ticker", "")
+        score = r.get("final_score", 0)
+        action = r.get("action", "")
+
+        if not ticker or not score:
+            continue
+
+        # Check if this ticker is currently held
+        is_held = any(
+            h.get("ticker") == ticker and h.get("quantity", 0) > 0
+            for h in holdings
+        )
+
+        if is_held:
+            held_scores[ticker] = score
+        elif action in ("HOLD", "SKIP") or (action == "BUY" and score > 0):
+            # This is a stock we analyzed but couldn't/didn't buy
+            # It's a potential upgrade candidate
+            candidate_scores[ticker] = score
+
+    if not held_scores or not candidate_scores:
+        return 0
+
+    # Sort: weakest held first, strongest candidates first
+    held_ranked = sorted(held_scores.items(), key=lambda x: x[1])
+    candidate_ranked = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
+
+    swaps_executed = 0
+    used_candidates = set()
+
+    for held_ticker, held_score in held_ranked:
+        # Find the holding object
+        holding = next(
+            (h for h in holdings if h.get("ticker") == held_ticker and h.get("quantity", 0) > 0),
+            None,
+        )
+        if not holding:
+            continue
+
+        # Check holding age — must be at least `rotation_min_hold_hours` old
+        bought_at = holding.get("bought_at")
+        if bought_at:
+            if isinstance(bought_at, str):
+                try:
+                    from datetime import datetime as dt_parse
+                    bought_at = dt_parse.fromisoformat(bought_at)
+                except (ValueError, TypeError):
+                    bought_at = None
+            if bought_at:
+                age_hours = (datetime.now(timezone.utc) - bought_at).total_seconds() / 3600
+                if age_hours < settings.rotation_min_hold_hours:
+                    logger.debug(
+                        f"Rotation skip {held_ticker} — held only {age_hours:.1f}h "
+                        f"(min: {settings.rotation_min_hold_hours}h)"
+                    )
+                    continue
+
+        # Find best available candidate that beats this holding
+        for cand_ticker, cand_score in candidate_ranked:
+            if cand_ticker in used_candidates:
+                continue
+
+            score_gap = cand_score - held_score
+            if score_gap < settings.rotation_min_score_gap:
+                break  # No more candidates are strong enough (sorted desc)
+
+            # ── Execute the swap ──────────────────────────────────────────
+            logger.info(
+                f"🔄 ROTATION: {held_ticker} (score: {held_score:.2f}) → "
+                f"{cand_ticker} (score: {cand_score:.2f}) | "
+                f"gap: +{score_gap:.2f}"
+            )
+
+            # Decide full vs partial sell based on score gap
+            sell_all = score_gap >= 0.25
+            sell_quantity = None if sell_all else max(1, holding["quantity"] // 2)
+
+            sell_reason = (
+                f"ROTATION: Upgrading to {cand_ticker} "
+                f"(score {cand_score:.2f} vs {held_score:.2f}, gap +{score_gap:.2f})"
+            )
+
+            # Get live price for the held stock
+            try:
+                held_prices = get_batch_prices([held_ticker])
+                sell_price = held_prices.get(held_ticker, 0)
+                if not sell_price:
+                    continue
+            except Exception:
+                continue
+
+            # Sell the weaker holding
+            sell_analysis = AnalysisResult(
+                ticker=held_ticker,
+                current_price=sell_price,
+                ml_confidence=held_score,
+                gemini_sentiment_score=0.0,
+                gemini_explanation=sell_reason,
+                gemini_confidence=held_score,
+                final_score=held_score,
+                action=TradeAction.SELL,
+                action_reason=sell_reason,
+            )
+
+            if sell_quantity:
+                sell_trade = await execute_sell(
+                    held_ticker, sell_price, sell_analysis,
+                    quantity=sell_quantity,
+                )
+            else:
+                sell_trade = await execute_sell(held_ticker, sell_price, sell_analysis)
+
+            if "error" in sell_trade:
+                logger.warning(f"Rotation sell failed for {held_ticker}: {sell_trade['error']}")
+                continue
+
+            asyncio.create_task(send_trade_alert(sell_trade))
+
+            # Buy the stronger candidate
+            try:
+                cand_prices = get_batch_prices([cand_ticker])
+                buy_price = cand_prices.get(cand_ticker, 0)
+                if not buy_price or buy_price <= 0:
+                    logger.warning(f"No price for rotation buy candidate {cand_ticker}")
+                    continue
+
+                # Find the candidate's analysis result for position sizing
+                cand_result = next(
+                    (r for r in cycle_results if r.get("ticker") == cand_ticker),
+                    None,
+                )
+
+                buy_analysis = AnalysisResult(
+                    ticker=cand_ticker,
+                    current_price=buy_price,
+                    ml_confidence=cand_score,
+                    gemini_sentiment_score=0.0,
+                    gemini_explanation=f"ROTATION BUY: Replacing {held_ticker}",
+                    gemini_confidence=cand_score,
+                    final_score=cand_score,
+                    action=TradeAction.BUY,
+                    action_reason=f"ROTATION BUY: Replacing {held_ticker} (gap +{score_gap:.2f})",
+                )
+
+                buy_trade = await execute_buy(
+                    ticker=cand_ticker,
+                    price=buy_price,
+                    analysis=buy_analysis,
+                    max_position_pct=settings.max_position_pct,
+                )
+
+                if "error" not in buy_trade:
+                    asyncio.create_task(send_trade_alert(buy_trade))
+                    logger.info(
+                        f"✅ ROTATION COMPLETE: Sold {held_ticker} → Bought {cand_ticker}"
+                    )
+                else:
+                    logger.warning(
+                        f"Rotation buy failed for {cand_ticker}: {buy_trade.get('error')}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Rotation buy error for {cand_ticker}: {e}")
+
+            used_candidates.add(cand_ticker)
+            swaps_executed += 1
+            break  # Move to next held stock
+
+    return swaps_executed
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

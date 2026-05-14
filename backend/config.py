@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     profit_take_partial_pct: float = 0.25      # sell 25% of position when taking profit
     profit_take_threshold_pct: float = 0.20    # take partial profit at 20%+ gain
 
+    # ── Portfolio Rotation ────────────────────────────────────────────────
+    rotation_min_score_gap: float = 0.15       # min score advantage for a swap
+    rotation_min_hold_hours: float = 24.0      # must hold at least 24h before rotation
+
     # ── Analysis Weights (must sum to 1.0) ───────────────────────────────
     weight_gemini: float = 0.40
     weight_ml: float = 0.25
