@@ -134,8 +134,16 @@ async def run_analysis_cycle(force: bool = False):
                 logger.warning("Analysis cycle cancelled by new request")
                 return {"status": "cancelled", "results": results}
             try:
-                result = await _analyze_single_ticker(ticker, portfolio)
+                # 120s timeout per ticker — prevents a single hung request
+                # from freezing the entire cycle for hours
+                result = await asyncio.wait_for(
+                    _analyze_single_ticker(ticker, portfolio),
+                    timeout=120.0,
+                )
                 results.append(result)
+            except asyncio.TimeoutError:
+                logger.error(f"TIMEOUT: {ticker} analysis exceeded 120s — skipping")
+                results.append({"ticker": ticker, "action": "ERROR", "error": "timeout"})
             except Exception as e:
                 logger.error(f"Error analyzing {ticker}: {e}", exc_info=True)
                 results.append({"ticker": ticker, "error": str(e)})

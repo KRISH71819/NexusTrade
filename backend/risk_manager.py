@@ -273,6 +273,26 @@ def detect_underperformers(
         if not current_price or not avg_price or quantity <= 0:
             continue
 
+        # ── GRACE PERIOD: Skip recently purchased stocks ─────────────
+        # Don't flag a stock as underperforming if we just bought it.
+        # Must hold for at least `underperformer_days` before checking.
+        bought_at = holding.get("bought_at")
+        if bought_at:
+            if isinstance(bought_at, str):
+                from datetime import datetime as dt_parse
+                try:
+                    bought_at = dt_parse.fromisoformat(bought_at)
+                except (ValueError, TypeError):
+                    bought_at = None
+            if bought_at:
+                holding_age_days = (datetime.now(timezone.utc) - bought_at).total_seconds() / 86400
+                if holding_age_days < settings.underperformer_days:
+                    logger.debug(
+                        f"Skipping {ticker} — held only {holding_age_days:.1f} days "
+                        f"(grace period: {settings.underperformer_days} days)"
+                    )
+                    continue
+
         # Current P&L
         pnl_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Virtual Trading Ledger — manages paper-trading portfolio operations.
 Every trade is logged with full AI brain transparency data.
 
@@ -228,6 +228,8 @@ async def execute_buy(
         existing["avg_price"] = round(avg_price, 2)
         # Update peak price
         existing["peak_price"] = max(existing.get("peak_price", 0), price)
+        # Update bought_at to latest buy time (resets underperformer grace period)
+        existing["bought_at"] = datetime.now(timezone.utc)
     else:
         from news_intelligence import get_sector
         holdings.append({
@@ -236,6 +238,7 @@ async def execute_buy(
             "avg_price": round(price, 2),
             "peak_price": round(price, 2),
             "sector": get_sector(ticker),
+            "bought_at": datetime.now(timezone.utc),
         })
 
     # Compute new total value using live price for all holdings
