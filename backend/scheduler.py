@@ -112,7 +112,15 @@ async def run_analysis_cycle(force: bool = False):
 
         # ── Step 2: Bulk screen watchlist ────────────────────────────────
         watchlist = resolve_watchlist(settings.watchlist)
-        top_candidates = bulk_screener(watchlist, max_results=settings.max_candidates_for_ai)
+        try:
+            # bulk_screener does a massive yf.download — run in thread so timeout works
+            top_candidates = await asyncio.wait_for(
+                asyncio.to_thread(bulk_screener, watchlist, settings.max_candidates_for_ai),
+                timeout=180.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error("TIMEOUT: Bulk screener exceeded 180s — using first N tickers as fallback")
+            top_candidates = watchlist[:settings.max_candidates_for_ai]
 
         analysis_tickers = list(set(top_candidates + held_tickers))
         logger.info(
@@ -497,10 +505,12 @@ async def _run_portfolio_rotation(cycle_results: list) -> int:
         if bought_at:
             if isinstance(bought_at, str):
                 try:
-                    from datetime import datetime as dt_parse
-                    bought_at = dt_parse.fromisoformat(bought_at)
+                    bought_at = datetime.fromisoformat(bought_at)
                 except (ValueError, TypeError):
                     bought_at = None
+            # MongoDB returns naive datetimes — attach UTC if missing
+            if bought_at and bought_at.tzinfo is None:
+                bought_at = bought_at.replace(tzinfo=timezone.utc)
             if bought_at:
                 age_hours = (datetime.now(timezone.utc) - bought_at).total_seconds() / 3600
                 if age_hours < settings.rotation_min_hold_hours:
@@ -646,8 +656,8 @@ async def run_risk_check():
         if not held_tickers:
             return
 
-        # Fetch live prices for all holdings
-        live_prices = get_batch_prices(held_tickers)
+        # Fetch live prices for all holdings (sync yf.download → run in thread)
+        live_prices = await asyncio.to_thread(get_batch_prices, held_tickers)
 
         # Update valuation with live prices
         await update_portfolio_valuation(live_prices)
@@ -682,7 +692,8 @@ async def run_risk_check():
         if stop_signals:
             portfolio = await get_portfolio()
 
-        underperformer_signals = detect_underperformers(portfolio, live_prices)
+        # detect_underperformers calls yf.download per holding — run in thread
+        underperformer_signals = await asyncio.to_thread(detect_underperformers, portfolio, live_prices)
 
         for signal in underperformer_signals:
             ticker = signal["ticker"]

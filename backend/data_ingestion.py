@@ -4,6 +4,7 @@ yfinance (primary) / Finnhub (fallback).  Computes technical indicators.
 Targeted at NSE/BSE Indian stocks.
 """
 
+import asyncio
 import yfinance as yf
 import finnhub
 import pandas as pd
@@ -417,7 +418,9 @@ async def ingest_ticker_data(ticker: str) -> dict:
     logger.info(f"Ingesting data for {ticker}...")
 
     try:
-        market_doc = build_market_data_doc(ticker)
+        # Run synchronous blocking I/O (yfinance, finnhub) in a thread pool
+        # so asyncio.wait_for(timeout=120) can actually cancel it
+        market_doc = await asyncio.to_thread(build_market_data_doc, ticker)
     except ValueError as e:
         return {"ticker": ticker, "error": str(e)}
 

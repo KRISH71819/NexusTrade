@@ -279,11 +279,13 @@ def detect_underperformers(
         bought_at = holding.get("bought_at")
         if bought_at:
             if isinstance(bought_at, str):
-                from datetime import datetime as dt_parse
                 try:
-                    bought_at = dt_parse.fromisoformat(bought_at)
+                    bought_at = datetime.fromisoformat(bought_at)
                 except (ValueError, TypeError):
                     bought_at = None
+            # MongoDB returns naive datetimes — attach UTC if missing
+            if bought_at and bought_at.tzinfo is None:
+                bought_at = bought_at.replace(tzinfo=timezone.utc)
             if bought_at:
                 holding_age_days = (datetime.now(timezone.utc) - bought_at).total_seconds() / 86400
                 if holding_age_days < settings.underperformer_days:
