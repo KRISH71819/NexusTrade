@@ -192,13 +192,33 @@ async def execute_buy(
     portfolio = await get_portfolio()
     cash = portfolio["cash"]
 
-    # Position sizing
+    # ── Guardrail 1: Max open positions (diversification) ───────────────
+    holdings_list = portfolio.get("holdings", [])
+    holdings_count = len([h for h in holdings_list if h.get("quantity", 0) > 0])
+    is_existing = any(h["ticker"] == ticker for h in holdings_list if h.get("quantity", 0) > 0)
+    if not is_existing and holdings_count >= settings.max_open_positions:
+        logger.warning(
+            f"MAX POSITIONS: Already holding {holdings_count}/{settings.max_open_positions} stocks. "
+            f"Cannot open new position in {ticker}."
+        )
+        return {"error": "Max positions reached", "ticker": ticker}
+
+    # ── Guardrail 2: Tiny cash reserve (5% emergency buffer) ─────────
+    min_reserve = portfolio["total_value"] * settings.min_cash_reserve_pct
+    spendable_cash = max(0, cash - min_reserve)
+
+    # ── Guardrail 3: Per-trade diversification cap ───────────────────
     position_pct = max_position_pct or settings.max_position_pct
-    max_spend = portfolio["total_value"] * position_pct
-    available = min(cash, max_spend)
+    trade_cap = settings.max_single_trade_pct
+    effective_pct = min(position_pct, trade_cap)
+    max_spend = portfolio["total_value"] * effective_pct
+    available = min(spendable_cash, max_spend)
 
     if available < price:
-        logger.warning(f"Insufficient funds to buy {ticker} at Rs.{price:.2f}")
+        logger.warning(
+            f"Insufficient funds to buy {ticker} at Rs.{price:.2f} "
+            f"(available: Rs.{available:.2f}, reserve: Rs.{min_reserve:.2f})"
+        )
         return {"error": "Insufficient funds", "ticker": ticker}
 
     if quantity is None:

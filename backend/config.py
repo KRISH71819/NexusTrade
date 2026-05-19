@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     rotation_min_score_gap: float = 0.15       # min score advantage for a swap
     rotation_min_hold_hours: float = 24.0      # must hold at least 24h before rotation
 
+    # ── Capital Allocation (diversification, not safety) ─────────────────
+    max_open_positions: int = 15               # max concurrent holdings
+    max_single_trade_pct: float = 0.10         # cap any single trade at 10% of portfolio
+    min_cash_reserve_pct: float = 0.05         # tiny 5% emergency buffer
+
+    # ── Batch Decision Thresholds ────────────────────────────────────────
+    score_strong_hold: float = 0.55            # score >= this → keep full position
+    score_weak_hold: float = 0.40              # score between weak and strong → partial sell
+    # score < weak_hold → full sell (free capital for better stocks)
+
     # ── Analysis Weights (must sum to 1.0) ───────────────────────────────
     weight_gemini: float = 0.40
     weight_ml: float = 0.25

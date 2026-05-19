@@ -76,6 +76,17 @@ def assess_risk(
         )
         risk_approved = False
 
+    # ── 3b. Max Open Positions ───────────────────────────────────────────
+    holdings_count = len([h for h in holdings if h.get("quantity", 0) > 0])
+    is_new_position = not any(
+        h.get("ticker") == ticker and h.get("quantity", 0) > 0 for h in holdings
+    )
+    if is_new_position and holdings_count >= settings.max_open_positions:
+        risk_flags.append(
+            f"MAX POSITIONS: Already holding {holdings_count}/{settings.max_open_positions} stocks"
+        )
+        risk_approved = False
+
     # ── 4. Stop-Loss Check (for existing positions) ──────────────────────
     stop_loss_price = None
     trailing_stop_price = None

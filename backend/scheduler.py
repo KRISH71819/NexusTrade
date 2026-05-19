@@ -157,14 +157,20 @@ async def run_analysis_cycle(force: bool = False):
                 results.append({"ticker": ticker, "error": str(e)})
             # llm_engine rate limiter enforces 4.2s between calls automatically
 
-        # ── Step 3.5: Portfolio Rotation (Smart Stock Upgrade) ────────────
-        # Compare candidate scores vs held scores — swap if clearly better
+        # ── Step 3.5: BATCH PORTFOLIO OPTIMIZATION ────────────────────────
+        # All tickers scored — now decide optimal portfolio composition.
+        # Sells weak holdings first (frees capital), then buys strongest
+        # candidates. This replaces the old portfolio rotation logic.
+        batch_stats = {"sells": 0, "buys": 0, "partial_sells": 0}
         try:
-            rotation_count = await _run_portfolio_rotation(results)
-            if rotation_count > 0:
-                logger.info(f"PORTFOLIO ROTATION: {rotation_count} swap(s) executed")
+            batch_stats = await _execute_batch_decisions(results)
+            logger.info(
+                f"BATCH OPTIMIZER: {batch_stats['sells']} full sell(s), "
+                f"{batch_stats['partial_sells']} partial sell(s), "
+                f"{batch_stats['buys']} buy(s)"
+            )
         except Exception as e:
-            logger.warning(f"Portfolio rotation failed: {e}", exc_info=True)
+            logger.error(f"Batch optimizer failed: {e}", exc_info=True)
 
         # ── Step 4: Update portfolio valuation with live prices ──────────
         try:
@@ -384,35 +390,13 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
         action_reason=action_reason,
     )
 
-    # ── 8. Execute ───────────────────────────────────────────────────────
-    if action == TradeAction.BUY:
-        max_pos_pct = min(
-            gemini_result.get("position_size_pct", settings.max_position_pct),
-            risk_assessment.max_allowed_position_pct,
-        )
-        trade = await execute_buy(
-            ticker=ticker,
-            price=current_price,
-            analysis=analysis,
-            max_position_pct=max_pos_pct,
-        )
-        if "error" not in trade:
-            asyncio.create_task(send_trade_alert(trade))
-
-    elif action == TradeAction.SELL:
-        trade = await execute_sell(
-            ticker=ticker,
-            price=current_price,
-            analysis=analysis,
-        )
-        if "error" not in trade:
-            asyncio.create_task(send_trade_alert(trade))
-
-    else:
-        await log_hold(ticker, analysis)
+    # ── 8. Return analysis (NO execution — batch optimizer handles trades) ──
+    # Log the scoring decision for transparency, but don't execute any trade.
+    # The batch optimizer in _execute_batch_decisions() will rank all stocks
+    # and execute sells/buys in optimal order after ALL tickers are scored.
 
     logger.info(
-        f"[{action.value}] {ticker} @ Rs{current_price:.2f} | "
+        f"[SCORED:{action.value}] {ticker} @ Rs{current_price:.2f} | "
         f"Score: {final_score:.2f} | ML: {ml_confidence:.2f} | "
         f"Gemini: {gemini_confidence:.2f} | News: {news_impact_score:+.2f} | "
         f"Crisis: {crisis_detected}"
@@ -427,211 +411,195 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
         "gemini_confidence": round(gemini_confidence, 3),
         "news_impact": round(news_impact_score, 3),
         "crisis": crisis_detected,
+        "analysis": analysis,              # full AnalysisResult for trade execution
+        "risk_assessment": risk_assessment, # RiskAssessment for position sizing
+        "gemini_result": gemini_result,     # Gemini output for position sizing
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#   PORTFOLIO ROTATION — Smart Stock Upgrade Engine
+#   BATCH PORTFOLIO OPTIMIZER — Score everything, then trade smart
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _run_portfolio_rotation(cycle_results: list) -> int:
+async def _execute_batch_decisions(cycle_results: list) -> dict:
     """
-    Compare unbought candidate scores against held stock scores.
-    If a candidate is significantly stronger, sell the weaker holding
-    and buy the stronger stock.
+    Batch Portfolio Optimizer — the brain of the trading system.
 
-    Rules:
-      - Only rotate stocks held for at least `rotation_min_hold_hours`
-      - Candidate must beat held stock by at least `rotation_min_score_gap`
-      - Score gap >= 0.25 → full sell & replace
-      - Score gap 0.15-0.25 → sell 50% and buy replacement
-      - Uses scores already computed this cycle (zero extra API calls)
+    Instead of executing trades greedily as each ticker is analyzed,
+    this function takes ALL scored results and makes optimal decisions:
 
-    Returns number of swaps executed.
+    Phase 1: CLASSIFY — sort held stocks into KEEP / REDUCE / SELL
+    Phase 2: SELL — execute sells first to free capital
+    Phase 3: BUY — buy strongest candidates with available capital
+
+    This ensures:
+    - The portfolio ALWAYS holds the highest-scoring stocks available
+    - Cash is never wasted on early weak signals while better ones wait
+    - Partial sells free capital without dumping recovering stocks
+    - No extra API calls — uses scores already computed this cycle
     """
     portfolio = await get_portfolio()
     holdings = portfolio.get("holdings", [])
+    held_tickers = {h["ticker"] for h in holdings if h.get("quantity", 0) > 0}
 
-    if not holdings:
-        return 0
+    # Filter to valid results only (must have score, price, and analysis object)
+    scored = [
+        r for r in cycle_results
+        if r.get("final_score") is not None
+        and r.get("price")
+        and r.get("analysis")
+    ]
 
-    # Build score maps from this cycle's results
-    # Candidates = scored stocks we did NOT buy (HOLD decisions on non-held tickers)
-    candidate_scores = {}
-    held_scores = {}
+    if not scored:
+        logger.info("BATCH OPTIMIZER: No valid scored results to process")
+        return {"sells": 0, "buys": 0, "partial_sells": 0}
 
-    for r in cycle_results:
-        ticker = r.get("ticker", "")
-        score = r.get("final_score", 0)
-        action = r.get("action", "")
+    # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
+    full_sells = []       # held stocks to fully exit
+    partial_sells = []    # held stocks to reduce exposure
+    buy_candidates = []   # new stocks to buy
+    keeps = []            # held stocks to keep as-is
 
-        if not ticker or not score:
-            continue
-
-        # Check if this ticker is currently held
-        is_held = any(
-            h.get("ticker") == ticker and h.get("quantity", 0) > 0
-            for h in holdings
-        )
+    for r in scored:
+        ticker = r["ticker"]
+        score = r["final_score"]
+        is_held = ticker in held_tickers
+        crisis = r.get("crisis", False)
+        action_recommended = r.get("action", "HOLD")
 
         if is_held:
-            held_scores[ticker] = score
-        elif action in ("HOLD", "SKIP") or (action == "BUY" and score > 0):
-            # This is a stock we analyzed but couldn't/didn't buy
-            # It's a potential upgrade candidate
-            candidate_scores[ticker] = score
-
-    if not held_scores or not candidate_scores:
-        return 0
-
-    # Sort: weakest held first, strongest candidates first
-    held_ranked = sorted(held_scores.items(), key=lambda x: x[1])
-    candidate_ranked = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
-
-    swaps_executed = 0
-    used_candidates = set()
-
-    for held_ticker, held_score in held_ranked:
-        # Find the holding object
-        holding = next(
-            (h for h in holdings if h.get("ticker") == held_ticker and h.get("quantity", 0) > 0),
-            None,
-        )
-        if not holding:
-            continue
-
-        # Check holding age — must be at least `rotation_min_hold_hours` old
-        bought_at = holding.get("bought_at")
-        if bought_at:
-            if isinstance(bought_at, str):
-                try:
-                    bought_at = datetime.fromisoformat(bought_at)
-                except (ValueError, TypeError):
-                    bought_at = None
-            # MongoDB returns naive datetimes — attach UTC if missing
-            if bought_at and bought_at.tzinfo is None:
-                bought_at = bought_at.replace(tzinfo=timezone.utc)
-            if bought_at:
-                age_hours = (datetime.now(timezone.utc) - bought_at).total_seconds() / 3600
-                if age_hours < settings.rotation_min_hold_hours:
-                    logger.debug(
-                        f"Rotation skip {held_ticker} — held only {age_hours:.1f}h "
-                        f"(min: {settings.rotation_min_hold_hours}h)"
-                    )
-                    continue
-
-        # Find best available candidate that beats this holding
-        for cand_ticker, cand_score in candidate_ranked:
-            if cand_ticker in used_candidates:
-                continue
-
-            score_gap = cand_score - held_score
-            if score_gap < settings.rotation_min_score_gap:
-                break  # No more candidates are strong enough (sorted desc)
-
-            # ── Execute the swap ──────────────────────────────────────────
-            logger.info(
-                f"🔄 ROTATION: {held_ticker} (score: {held_score:.2f}) → "
-                f"{cand_ticker} (score: {cand_score:.2f}) | "
-                f"gap: +{score_gap:.2f}"
-            )
-
-            # Decide full vs partial sell based on score gap
-            sell_all = score_gap >= 0.25
-            sell_quantity = None if sell_all else max(1, holding["quantity"] // 2)
-
-            sell_reason = (
-                f"ROTATION: Upgrading to {cand_ticker} "
-                f"(score {cand_score:.2f} vs {held_score:.2f}, gap +{score_gap:.2f})"
-            )
-
-            # Get live price for the held stock
-            try:
-                held_prices = get_batch_prices([held_ticker])
-                sell_price = held_prices.get(held_ticker, 0)
-                if not sell_price:
-                    continue
-            except Exception:
-                continue
-
-            # Sell the weaker holding
-            sell_analysis = AnalysisResult(
-                ticker=held_ticker,
-                current_price=sell_price,
-                ml_confidence=held_score,
-                gemini_sentiment_score=0.0,
-                gemini_explanation=sell_reason,
-                gemini_confidence=held_score,
-                final_score=held_score,
-                action=TradeAction.SELL,
-                action_reason=sell_reason,
-            )
-
-            if sell_quantity:
-                sell_trade = await execute_sell(
-                    held_ticker, sell_price, sell_analysis,
-                    quantity=sell_quantity,
+            # ── Decide what to do with HELD stocks ────────────────────
+            if crisis or score < settings.score_weak_hold:
+                # Weak stock or crisis → full sell to free capital
+                full_sells.append(r)
+                logger.info(
+                    f"  CLASSIFY {ticker}: FULL SELL "
+                    f"(score={score:.2f} < {settings.score_weak_hold}, crisis={crisis})"
+                )
+            elif score < settings.score_strong_hold:
+                # Mediocre stock → partial sell (free some capital, keep upside)
+                partial_sells.append(r)
+                logger.info(
+                    f"  CLASSIFY {ticker}: PARTIAL SELL "
+                    f"(score={score:.2f}, between {settings.score_weak_hold}-{settings.score_strong_hold})"
                 )
             else:
-                sell_trade = await execute_sell(held_ticker, sell_price, sell_analysis)
+                # Strong stock → keep entire position
+                keeps.append(r)
+                logger.debug(f"  CLASSIFY {ticker}: KEEP (score={score:.2f})")
+        else:
+            # ── New candidate — only consider if score qualifies for BUY ──
+            if action_recommended == "BUY" and score >= 0.60 and not crisis:
+                buy_candidates.append(r)
 
-            if "error" in sell_trade:
-                logger.warning(f"Rotation sell failed for {held_ticker}: {sell_trade['error']}")
-                continue
+    # Sort buy candidates by score descending (best opportunities first)
+    buy_candidates.sort(key=lambda r: r["final_score"], reverse=True)
 
-            asyncio.create_task(send_trade_alert(sell_trade))
+    logger.info(
+        f"BATCH OPTIMIZER PLAN: "
+        f"{len(full_sells)} full sell(s), {len(partial_sells)} partial sell(s), "
+        f"{len(keeps)} keep(s), {len(buy_candidates)} buy candidate(s)"
+    )
 
-            # Buy the stronger candidate
-            try:
-                cand_prices = get_batch_prices([cand_ticker])
-                buy_price = cand_prices.get(cand_ticker, 0)
-                if not buy_price or buy_price <= 0:
-                    logger.warning(f"No price for rotation buy candidate {cand_ticker}")
-                    continue
+    stats = {"sells": 0, "buys": 0, "partial_sells": 0}
 
-                # Find the candidate's analysis result for position sizing
-                cand_result = next(
-                    (r for r in cycle_results if r.get("ticker") == cand_ticker),
-                    None,
+    # ── PHASE 2: EXECUTE SELLS FIRST (frees capital for buys) ────────────
+    for r in full_sells:
+        ticker = r["ticker"]
+        analysis = r["analysis"]
+        price = r["price"]
+
+        trade = await execute_sell(ticker, price, analysis)
+        if "error" not in trade:
+            asyncio.create_task(send_trade_alert(trade))
+            stats["sells"] += 1
+            logger.info(
+                f"  BATCH SELL: {ticker} @ Rs.{price:.2f} "
+                f"(score {r['final_score']:.2f} < {settings.score_weak_hold})"
+            )
+        else:
+            logger.warning(f"  BATCH SELL FAILED: {ticker} — {trade.get('error')}")
+
+    for r in partial_sells:
+        ticker = r["ticker"]
+        analysis = r["analysis"]
+        price = r["price"]
+
+        # Find holding to calculate 50% sell
+        holding = next((h for h in holdings if h["ticker"] == ticker), None)
+        if holding and holding.get("quantity", 0) > 1:
+            sell_qty = max(1, holding["quantity"] // 2)
+            trade = await execute_sell(ticker, price, analysis, quantity=sell_qty)
+            if "error" not in trade:
+                asyncio.create_task(send_trade_alert(trade))
+                stats["partial_sells"] += 1
+                logger.info(
+                    f"  BATCH PARTIAL SELL: {ticker} — sold {sell_qty}/{holding['quantity']} shares "
+                    f"(score {r['final_score']:.2f}, freeing capital for stronger stocks)"
                 )
+            else:
+                logger.warning(f"  BATCH PARTIAL SELL FAILED: {ticker} — {trade.get('error')}")
 
-                buy_analysis = AnalysisResult(
-                    ticker=cand_ticker,
-                    current_price=buy_price,
-                    ml_confidence=cand_score,
-                    gemini_sentiment_score=0.0,
-                    gemini_explanation=f"ROTATION BUY: Replacing {held_ticker}",
-                    gemini_confidence=cand_score,
-                    final_score=cand_score,
-                    action=TradeAction.BUY,
-                    action_reason=f"ROTATION BUY: Replacing {held_ticker} (gap +{score_gap:.2f})",
-                )
+    # ── PHASE 3: EXECUTE BUYS (strongest scores first) ───────────────────
+    # Re-fetch portfolio after sells to get updated cash balance
+    portfolio = await get_portfolio()
+    current_holdings_count = len([
+        h for h in portfolio.get("holdings", [])
+        if h.get("quantity", 0) > 0
+    ])
 
-                buy_trade = await execute_buy(
-                    ticker=cand_ticker,
-                    price=buy_price,
-                    analysis=buy_analysis,
-                    max_position_pct=settings.max_position_pct,
-                )
+    for r in buy_candidates:
+        # Check position limit before each buy
+        if current_holdings_count >= settings.max_open_positions:
+            logger.info(
+                f"  BATCH BUY STOP: Max positions ({settings.max_open_positions}) reached. "
+                f"Skipping remaining {len(buy_candidates) - buy_candidates.index(r)} candidates."
+            )
+            break
 
-                if "error" not in buy_trade:
-                    asyncio.create_task(send_trade_alert(buy_trade))
-                    logger.info(
-                        f"✅ ROTATION COMPLETE: Sold {held_ticker} → Bought {cand_ticker}"
-                    )
-                else:
-                    logger.warning(
-                        f"Rotation buy failed for {cand_ticker}: {buy_trade.get('error')}"
-                    )
+        ticker = r["ticker"]
+        analysis = r["analysis"]
+        price = r["price"]
+        risk_assessment = r.get("risk_assessment")
+        gemini_result = r.get("gemini_result", {})
 
-            except Exception as e:
-                logger.warning(f"Rotation buy error for {cand_ticker}: {e}")
+        # Position sizing: use the most conservative of all recommendations
+        max_pos_pct = min(
+            gemini_result.get("position_size_pct", settings.max_position_pct),
+            risk_assessment.max_allowed_position_pct if risk_assessment else settings.max_position_pct,
+            settings.max_single_trade_pct,  # per-trade diversification cap
+        )
 
-            used_candidates.add(cand_ticker)
-            swaps_executed += 1
-            break  # Move to next held stock
+        trade = await execute_buy(
+            ticker=ticker,
+            price=price,
+            analysis=analysis,
+            max_position_pct=max_pos_pct,
+        )
 
-    return swaps_executed
+        if "error" not in trade:
+            asyncio.create_task(send_trade_alert(trade))
+            stats["buys"] += 1
+            current_holdings_count += 1
+            logger.info(
+                f"  BATCH BUY: {ticker} @ Rs.{price:.2f} "
+                f"(score {r['final_score']:.2f}, rank #{buy_candidates.index(r) + 1})"
+            )
+        else:
+            logger.warning(f"  BATCH BUY FAILED: {ticker} — {trade.get('error')}")
+
+        # Re-fetch portfolio to get updated cash for next buy
+        portfolio = await get_portfolio()
+
+    # Log final portfolio state
+    final_portfolio = await get_portfolio()
+    logger.info(
+        f"BATCH OPTIMIZER DONE | Cash: Rs.{final_portfolio['cash']:,.2f} | "
+        f"Holdings: {len([h for h in final_portfolio.get('holdings', []) if h.get('quantity', 0) > 0])} | "
+        f"Total: Rs.{final_portfolio.get('total_value', 0):,.2f}"
+    )
+
+    return stats
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
