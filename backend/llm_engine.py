@@ -19,6 +19,7 @@ position sizing, risk factors, and detailed reasoning.
 
 import logging
 import asyncio
+import re
 import time
 import threading
 from datetime import date
@@ -224,6 +225,34 @@ def _analyze_sync(
     }
 
 
+
+def _sanitize_json(raw: str) -> str:
+    """Strip markdown code fences and trailing garbage from LLM JSON output.
+
+    Gemma 4 31B occasionally wraps its JSON in ```json blocks or appends
+    explanatory text after the closing brace, which breaks Pydantic parsing.
+    """
+    text = raw.strip()
+    # Remove ```json ... ``` wrappers
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    # Find the outermost JSON object { ... }
+    start = text.find("{")
+    if start == -1:
+        return text  # no JSON object found, return as-is for error handling
+    depth = 0
+    end = start
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    return text[start:end + 1]
+
+
 def _try_model(client, model_name: str, prompt: str, ticker: str) -> Optional[dict]:
     """Try a specific model with retries. Returns parsed result or None."""
     max_retries = 3
@@ -243,7 +272,9 @@ def _try_model(client, model_name: str, prompt: str, ticker: str) -> Optional[di
                     temperature=0.15,
                 ),
             )
-            result = GeminiAnalysisResponse.model_validate_json(response.text)
+            raw_text = response.text
+            clean_json = _sanitize_json(raw_text)
+            result = GeminiAnalysisResponse.model_validate_json(clean_json)
             logger.info(
                 f"LLM analysis succeeded for {ticker} | "
                 f"model={model_name} attempt={attempt+1} | "

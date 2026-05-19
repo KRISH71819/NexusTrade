@@ -130,7 +130,7 @@ def load_nifty500_watchlist() -> list[str]:
             symbol = (row.get("Symbol") or "").strip()
             if symbol:
                 ticker = f"{symbol.replace(' ', '')}.NS"
-                if ticker not in DELISTED_SYMBOLS:
+                if ticker not in DELISTED_SYMBOLS and not symbol.upper().startswith("DUMMY"):
                     symbols.append(ticker)
 
         if symbols:
