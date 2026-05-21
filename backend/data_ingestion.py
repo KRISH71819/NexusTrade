@@ -332,25 +332,98 @@ def _fetch_news_finnhub(ticker: str, max_headlines: int) -> List[NewsItem]:
         return []
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#   BULK SCREENER (STAGE 1)
-# ═══════════════════════════════════════════════════════════════════════════════
+import time as _time  # for bulk screener delays
+
+
+def _chunked_yf_download(
+    tickers: List[str],
+    chunk_size: int = 50,
+    max_retries: int = 3,
+    **yf_kwargs,
+) -> pd.DataFrame:
+    """
+    Download yfinance data in chunks with adaptive backoff.
+
+    Better than fixed delays between every chunk because:
+    - Only sleeps 1s between normal chunks (minimal overhead)
+    - If rate-limited, retries that specific chunk with exponential backoff
+    - Failed tickers in one chunk don't block the rest
+
+    Args:
+        tickers: Full list of tickers to download.
+        chunk_size: Number of tickers per batch (50 is safe for Yahoo).
+        max_retries: Max retries per chunk on rate limit errors.
+        **yf_kwargs: Passed through to yf.download (period, interval, etc.)
+    """
+    chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
+    all_frames = []
+
+    for chunk_idx, chunk in enumerate(chunks):
+        for attempt in range(max_retries):
+            try:
+                df = yf.download(
+                    chunk,
+                    group_by="ticker",
+                    threads=True,
+                    progress=False,
+                    **yf_kwargs,
+                )
+                if not df.empty:
+                    all_frames.append((chunk, df))
+                logger.debug(
+                    f"Bulk download chunk {chunk_idx + 1}/{len(chunks)} "
+                    f"({len(chunk)} tickers) OK"
+                )
+                break  # Success — move to next chunk
+            except Exception as e:
+                err_str = str(e)
+                if "Too Many Requests" in err_str or "Rate" in err_str or "429" in err_str:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    logger.warning(
+                        f"Rate limited on chunk {chunk_idx + 1} "
+                        f"(attempt {attempt + 1}/{max_retries}), waiting {wait}s..."
+                    )
+                    _time.sleep(wait)
+                else:
+                    logger.warning(f"Chunk {chunk_idx + 1} download error: {err_str[:100]}")
+                    break  # Non-rate-limit error, skip this chunk
+
+        # Brief pause between chunks to avoid triggering rate limits
+        if chunk_idx < len(chunks) - 1:
+            _time.sleep(1.0)
+
+    # Merge all chunk DataFrames
+    if not all_frames:
+        return pd.DataFrame()
+
+    if len(all_frames) == 1:
+        return all_frames[0][1]
+
+    # For multi-ticker downloads, yfinance returns MultiIndex columns
+    # We need to merge them carefully
+    merged = pd.concat([df for _, df in all_frames], axis=1)
+    return merged
+
 
 def bulk_screener(tickers: List[str], max_results: int = 10) -> List[str]:
     """
-    Fast pre-screening across multiple tickers using yfinance bulk download.
+    Fast pre-screening across multiple tickers using chunked yfinance download.
     Returns top tickers exhibiting volume spikes and RSI momentum.
+
+    Downloads in batches of 50 to avoid Yahoo Finance rate limits.
     """
-    logger.info(f"Running bulk pre-screener on {len(tickers)} tickers...")
+    logger.info(f"Running bulk pre-screener on {len(tickers)} tickers (chunked)...")
     try:
-        df = yf.download(
+        df = _chunked_yf_download(
             tickers,
+            chunk_size=50,
             period="60d",
             interval="1h",
-            group_by="ticker",
-            threads=True,
-            progress=False,
         )
+
+        if df.empty:
+            logger.warning("Bulk screener got empty DataFrame, using fallback tickers")
+            return tickers[:max_results]
 
         candidates = []
         ranked = []
