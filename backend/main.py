@@ -84,13 +84,14 @@ app.add_middleware(
 
 # ── Mount Routers ────────────────────────────────────────────────────────────
 
-from routers import portfolio, trades, analysis, market, news  # noqa: E402
+from routers import portfolio, trades, analysis, market, news, analytics  # noqa: E402
 
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
 app.include_router(trades.router, prefix="/api", tags=["Trades"])
 app.include_router(analysis.router, prefix="/api", tags=["Analysis"])
 app.include_router(market.router, prefix="/api", tags=["Market Data"])
 app.include_router(news.router, prefix="/api", tags=["News Intelligence"])
+app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────

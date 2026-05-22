@@ -209,7 +209,29 @@ def check_stop_losses(portfolio: dict, current_prices: Dict[str, float]) -> List
             })
             continue
 
-        # Check trailing stop
+        # ── STRICT TRAILING STOP (always-on, no activation gate) ─────────
+        # If peak_price is tracked and price has dropped X% from peak, sell.
+        # This protects profits even on stocks that never rallied past the
+        # activation threshold. Uses trailing_stop_strict_pct (default 8%).
+        if peak_price > avg_price:  # only meaningful if we've seen gains
+            strict_stop_price = peak_price * (1 - settings.trailing_stop_strict_pct)
+            if current_price <= strict_stop_price:
+                drop_pct = (peak_price - current_price) / peak_price
+                sell_signals.append({
+                    "ticker": ticker,
+                    "reason": (
+                        f"TRAILING STOP HIT: Price Rs.{current_price:.2f} dropped "
+                        f"{drop_pct:.1%} from peak Rs.{peak_price:.2f} "
+                        f"(strict {settings.trailing_stop_strict_pct:.0%} trailing stop)"
+                    ),
+                    "price": current_price,
+                    "trigger": "trailing_stop_strict",
+                })
+                continue
+
+        # ── ACTIVATION-GATED TRAILING STOP (after significant gain) ──────
+        # After the stock gains trailing_stop_activation_pct (15%) from entry,
+        # set a tighter trailing stop at trailing_stop_distance_pct (10%) from peak.
         gain_pct = (peak_price - avg_price) / avg_price if avg_price > 0 else 0
         if gain_pct >= settings.trailing_stop_activation_pct:
             trailing_stop_price = peak_price * (1 - settings.trailing_stop_distance_pct)
@@ -217,9 +239,9 @@ def check_stop_losses(portfolio: dict, current_prices: Dict[str, float]) -> List
                 sell_signals.append({
                     "ticker": ticker,
                     "reason": (
-                        f"TRAILING STOP: Price Rs.{current_price:.2f} below "
+                        f"TRAILING STOP HIT: Price Rs.{current_price:.2f} below "
                         f"trailing Rs.{trailing_stop_price:.2f} "
-                        f"(peak Rs.{peak_price:.2f})"
+                        f"(peak Rs.{peak_price:.2f}, activated at {settings.trailing_stop_activation_pct:.0%} gain)"
                     ),
                     "price": current_price,
                     "trigger": "trailing_stop",

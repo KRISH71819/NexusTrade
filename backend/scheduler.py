@@ -540,13 +540,20 @@ async def _execute_batch_decisions(cycle_results: list) -> dict:
             else:
                 logger.warning(f"  BATCH PARTIAL SELL FAILED: {ticker} — {trade.get('error')}")
 
-    # ── PHASE 3: EXECUTE BUYS (strongest scores first) ───────────────────
+    # ── PHASE 3: EXECUTE BUYS (strongest scores first, with SWAP logic) ───
     # Re-fetch portfolio after sells to get updated cash balance
     portfolio = await get_portfolio()
     current_holdings_count = len([
         h for h in portfolio.get("holdings", [])
         if h.get("quantity", 0) > 0
     ])
+
+    # Build a score map of all current holdings from this cycle's results
+    # Used for swap decisions when cash is insufficient
+    holding_scores = {}
+    for r in scored:
+        if r["ticker"] in held_tickers and r.get("final_score") is not None:
+            holding_scores[r["ticker"]] = r
 
     for r in buy_candidates:
         # Check position limit before each buy
@@ -585,6 +592,125 @@ async def _execute_batch_decisions(cycle_results: list) -> dict:
                 f"  BATCH BUY: {ticker} @ Rs.{price:.2f} "
                 f"(score {r['final_score']:.2f}, rank #{buy_candidates.index(r) + 1})"
             )
+        elif trade.get("error") == "Insufficient funds":
+            # ── SWAP LOGIC: Sell weakest holding to fund this buy ─────
+            # Find the current holding with the lowest score from this cycle
+            swappable = []
+            current_portfolio = await get_portfolio()
+            current_holdings = current_portfolio.get("holdings", [])
+
+            for h in current_holdings:
+                h_ticker = h.get("ticker", "")
+                h_qty = h.get("quantity", 0)
+                if h_qty <= 0 or h_ticker == ticker:
+                    continue
+
+                # Check holding age — must be held >= rotation_min_hold_hours
+                bought_at = h.get("bought_at")
+                if bought_at:
+                    if isinstance(bought_at, str):
+                        try:
+                            from datetime import datetime as dt_parse
+                            bought_at = dt_parse.fromisoformat(bought_at)
+                        except (ValueError, TypeError):
+                            bought_at = None
+                    if bought_at and bought_at.tzinfo is None:
+                        from datetime import timezone as tz
+                        bought_at = bought_at.replace(tzinfo=tz.utc)
+                    if bought_at:
+                        from datetime import datetime as dt_now, timezone as tz_now
+                        age_hours = (dt_now.now(tz_now.utc) - bought_at).total_seconds() / 3600
+                        if age_hours < settings.rotation_min_hold_hours:
+                            continue
+
+                # Get this holding's score from the current cycle
+                h_score_data = holding_scores.get(h_ticker)
+                if h_score_data:
+                    swappable.append({
+                        "ticker": h_ticker,
+                        "score": h_score_data["final_score"],
+                        "holding": h,
+                        "result": h_score_data,
+                    })
+
+            if not swappable:
+                logger.warning(
+                    f"  SWAP FAILED: No swappable holdings for {ticker} "
+                    f"(all too new or no scores)"
+                )
+                continue
+
+            # Find the weakest holding
+            swappable.sort(key=lambda x: x["score"])
+            weakest = swappable[0]
+            score_gap = r["final_score"] - weakest["score"]
+
+            if score_gap >= settings.rotation_min_score_gap:
+                # Execute the swap: SELL weak, then BUY strong
+                swap_reason = (
+                    f"CAPITAL SWAP: Sold {weakest['ticker']} "
+                    f"(score {weakest['score']:.2f}) to fund "
+                    f"{ticker} (score {r['final_score']:.2f}, "
+                    f"gap {score_gap:.2f} >= {settings.rotation_min_score_gap})"
+                )
+                logger.info(f"  {swap_reason}")
+
+                # Build analysis for the sell
+                swap_analysis = AnalysisResult(
+                    ticker=weakest["ticker"],
+                    current_price=weakest["result"]["price"],
+                    ml_confidence=weakest["result"].get("ml_confidence", 0),
+                    gemini_sentiment_score=0.0,
+                    gemini_explanation=swap_reason,
+                    gemini_confidence=0.0,
+                    final_score=weakest["score"],
+                    action=TradeAction.SELL,
+                    action_reason=swap_reason,
+                )
+
+                sell_trade = await execute_sell(
+                    weakest["ticker"],
+                    weakest["result"]["price"],
+                    swap_analysis,
+                )
+
+                if "error" not in sell_trade:
+                    asyncio.create_task(send_trade_alert(sell_trade))
+                    stats["sells"] += 1
+                    current_holdings_count -= 1
+
+                    # Now retry the buy with freed capital
+                    retry_trade = await execute_buy(
+                        ticker=ticker,
+                        price=price,
+                        analysis=analysis,
+                        max_position_pct=max_pos_pct,
+                    )
+
+                    if "error" not in retry_trade:
+                        asyncio.create_task(send_trade_alert(retry_trade))
+                        stats["buys"] += 1
+                        current_holdings_count += 1
+                        logger.info(
+                            f"  SWAP BUY: {ticker} @ Rs.{price:.2f} "
+                            f"(funded by selling {weakest['ticker']})"
+                        )
+                    else:
+                        logger.warning(
+                            f"  SWAP BUY FAILED after sell: {ticker} — "
+                            f"{retry_trade.get('error')}"
+                        )
+                else:
+                    logger.warning(
+                        f"  SWAP SELL FAILED: {weakest['ticker']} — "
+                        f"{sell_trade.get('error')}"
+                    )
+            else:
+                logger.info(
+                    f"  SWAP SKIPPED: {ticker} (score {r['final_score']:.2f}) vs "
+                    f"weakest {weakest['ticker']} (score {weakest['score']:.2f}) — "
+                    f"gap {score_gap:.2f} < {settings.rotation_min_score_gap}"
+                )
         else:
             logger.warning(f"  BATCH BUY FAILED: {ticker} — {trade.get('error')}")
 

@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     # ── Risk Management ──────────────────────────────────────────────────
     stop_loss_pct: float = 0.07          # sell if position drops 7%
     trailing_stop_activation_pct: float = 0.15  # activate trailing after 15% gain
-    trailing_stop_distance_pct: float = 0.10    # trailing stop at 10% from peak
+    trailing_stop_distance_pct: float = 0.10    # trailing stop at 10% from peak (after activation)
+    trailing_stop_strict_pct: float = 0.08       # ALWAYS-ON: sell if price drops 8% from peak
     max_drawdown_pct: float = 0.15       # halt buying if portfolio down 15%
     max_sector_stocks: int = 3           # max holdings per sector
 
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
     profit_take_threshold_pct: float = 0.20    # take partial profit at 20%+ gain
 
     # ── Portfolio Rotation ────────────────────────────────────────────────
-    rotation_min_score_gap: float = 0.15       # min score advantage for a swap
+    rotation_min_score_gap: float = 0.25       # min score advantage for a swap
     rotation_min_hold_hours: float = 24.0      # must hold at least 24h before rotation
 
     # ── Capital Allocation (diversification, not safety) ─────────────────

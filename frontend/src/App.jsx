@@ -2,9 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
   BarChart3,
   Brain,
   CandlestickChart,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleDollarSign,
   Database,
   Globe,
@@ -16,7 +21,10 @@ import {
   Search,
   Shield,
   ShieldCheck,
+  ShieldAlert,
+  Target,
   TrendingDown,
+  TrendingUp,
   Wallet,
 } from "lucide-react";
 import { api, apiBase } from "./api";
@@ -45,6 +53,18 @@ const emptyDashboard = {
   news: null,
 };
 
+const emptyPnl = {
+  daily_pnl: { value: 0, pct: 0 },
+  weekly_pnl: { value: 0, pct: 0 },
+  yearly_pnl: { value: 0, pct: 0 },
+  total_realized_pnl: 0,
+  total_unrealized_pnl: 0,
+  total_portfolio_value: 0,
+  cash: 0,
+  total_pnl: 0,
+  total_pnl_pct: 0,
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState(emptyDashboard);
   const [selectedTicker, setSelectedTicker] = useState("");
@@ -52,6 +72,9 @@ export default function App() {
   const [analysisHistory, setAnalysisHistory] = useState([]);
   const [activeTab, setActiveTab] = useState("chart");
   const [capitalAmount, setCapitalAmount] = useState("1000000");
+  const [pnlData, setPnlData] = useState(emptyPnl);
+  const [tradeHistory, setTradeHistory] = useState({ trades: [], total_count: 0, page: 1, total_pages: 1 });
+  const [tradeHistoryPage, setTradeHistoryPage] = useState(1);
   const [status, setStatus] = useState({
     loading: true,
     action: "",
@@ -118,7 +141,7 @@ export default function App() {
       }));
 
       try {
-        const [health, watchlistInfo, portfolio, portfolioHistory, analyses, trades, news] =
+        const [health, watchlistInfo, portfolio, portfolioHistory, analyses, trades, news, pnl] =
           await Promise.all([
             api.health(),
             api.watchlist(),
@@ -127,7 +150,10 @@ export default function App() {
             api.latestAnalyses(),
             api.trades(150),
             api.latestNews().catch(() => null),
+            api.pnlAnalytics().catch(() => emptyPnl),
           ]);
+
+        setPnlData(pnl || emptyPnl);
 
         const nextDashboard = {
           portfolio,
@@ -242,10 +268,18 @@ export default function App() {
     }
   };
 
+  // Fetch trade history when page changes or on tab switch
+  useEffect(() => {
+    if (activeTab === "trades") {
+      api.tradeHistory(tradeHistoryPage, 30).then(setTradeHistory).catch(() => {});
+    }
+  }, [activeTab, tradeHistoryPage]);
+
   const counts = useMemo(() => countActions(dashboard.analyses), [dashboard.analyses]);
   const portfolio = dashboard.portfolio || {};
   const holdings = portfolio.holdings || [];
   const isBusy = status.loading || Boolean(status.action);
+  const riskStatus = portfolio.risk_status || {};
 
   return (
     <div className="app-shell">
@@ -366,35 +400,48 @@ export default function App() {
         <section className="metrics-grid">
           <MetricCard
             icon={<CircleDollarSign size={18} />}
-            label="Total Value"
+            label="Portfolio Value"
             value={money(portfolio.total_value)}
-            sub={`${money(portfolio.total_pnl)} (${percent(portfolio.total_pnl_pct)})`}
-            trend={portfolio.total_pnl}
+            sub={`${money(pnlData.total_pnl)} (${percent(pnlData.total_pnl_pct)})`}
+            trend={pnlData.total_pnl}
+            glow
           />
           <MetricCard
-            icon={<Wallet size={18} />}
-            label="Cash"
-            value={money(portfolio.cash)}
-            sub={`${percent(portfolio.total_value ? (portfolio.cash / portfolio.total_value) * 100 : 0)} liquid`}
+            icon={pnlData.daily_pnl.value >= 0 ? <TrendingUp size={18} /> : <TrendingDown size={18} />}
+            label="Daily P&L"
+            value={money(pnlData.daily_pnl.value)}
+            sub={percent(pnlData.daily_pnl.pct)}
+            trend={pnlData.daily_pnl.value}
+            glow
+          />
+          <MetricCard
+            icon={pnlData.weekly_pnl.value >= 0 ? <ArrowUpRight size={18} /> : <ArrowDownRight size={18} />}
+            label="Weekly P&L"
+            value={money(pnlData.weekly_pnl.value)}
+            sub={percent(pnlData.weekly_pnl.pct)}
+            trend={pnlData.weekly_pnl.value}
+            glow
           />
           <MetricCard
             icon={<Activity size={18} />}
-            label="Invested"
-            value={money(portfolio.holdings_value)}
-            sub={`${holdings.length} open holdings`}
+            label="Realized P&L"
+            value={money(pnlData.total_realized_pnl)}
+            sub={`Unrealized: ${money(pnlData.total_unrealized_pnl)}`}
+            trend={pnlData.total_realized_pnl}
+            glow
           />
           <MetricCard
-            icon={<Shield size={18} />}
+            icon={<Wallet size={18} />}
+            label="Cash Available"
+            value={money(portfolio.cash)}
+            sub={`${holdings.length} holdings | ${percent(portfolio.total_value ? (portfolio.cash / portfolio.total_value) * 100 : 0)} liquid`}
+          />
+          <MetricCard
+            icon={riskStatus.buying_halted ? <ShieldAlert size={18} /> : <Shield size={18} />}
             label="Risk Status"
-            value={portfolio.risk_status?.buying_halted ? "HALTED" : "ACTIVE"}
-            sub={`Drawdown: ${portfolio.drawdown_pct?.toFixed(1) || '0.0'}% / ${(portfolio.risk_status?.drawdown_limit || 15).toFixed(0)}%`}
-            trend={portfolio.risk_status?.buying_halted ? -1 : 1}
-          />
-          <MetricCard
-            icon={<Brain size={18} />}
-            label="AI Decisions"
-            value={String(dashboard.analyses.length)}
-            sub={`BUY ${counts.BUY} / SELL ${counts.SELL} / HOLD ${counts.HOLD}`}
+            value={riskStatus.buying_halted ? "HALTED" : "ACTIVE"}
+            sub={`Drawdown ${portfolio.drawdown_pct?.toFixed(1) || '0.0'}% / ${(riskStatus.drawdown_limit || 15).toFixed(0)}%`}
+            trend={riskStatus.buying_halted ? -1 : 1}
           />
         </section>
 
@@ -418,14 +465,14 @@ export default function App() {
                 <span>Mouse wheel zoom, drag pan, crosshair OHLC, volume, SMA overlays, trade markers</span>
               </div>
               <div className="segmented">
-                {["chart", "scanner", "ledger", "news"].map((tab) => (
+                {["chart", "scanner", "trades", "ledger", "news"].map((tab) => (
                   <button
                     className={activeTab === tab ? "active" : ""}
                     key={tab}
                     onClick={() => setActiveTab(tab)}
                     type="button"
                   >
-                    {tab === "news" ? "📰 News" : tab}
+                    {tab === "news" ? "📰 News" : tab === "trades" ? "📊 Trades" : tab}
                   </button>
                 ))}
               </div>
@@ -445,6 +492,13 @@ export default function App() {
                 setActiveTab("chart");
                 loadTicker(ticker);
               }} />
+            )}
+            {activeTab === "trades" && (
+              <TradeHistoryPanel
+                data={tradeHistory}
+                page={tradeHistoryPage}
+                onPageChange={setTradeHistoryPage}
+              />
             )}
             {activeTab === "ledger" && <TradeLedger trades={dashboard.trades} />}
             {activeTab === "news" && <GlobalNewsPanel news={dashboard.news} />}
@@ -535,7 +589,7 @@ export default function App() {
 
         <section className="detail-grid">
           <NewsPanel analysis={selectedAnalysis} news={dashboard.news} ticker={selectedTicker} />
-          <HoldingsPanel holdings={holdings} cash={portfolio.cash} riskStatus={portfolio.risk_status} sectorAllocation={portfolio.sector_allocation} />
+          <HoldingsPanel holdings={holdings} cash={portfolio.cash} riskStatus={portfolio.risk_status} sectorAllocation={portfolio.sector_allocation} stopPct={0.08} />
           <AuditPanel analyses={analysisHistory.length ? analysisHistory : dashboard.analyses} />
         </section>
       </main>
@@ -575,14 +629,17 @@ function ActionPill({ action }) {
   return <span className={`action-pill ${actionClass(action)}`}>{action || "HOLD"}</span>;
 }
 
-function MetricCard({ icon, label, value, sub, trend }) {
+function MetricCard({ icon, label, value, sub, trend, glow }) {
+  const glowClass = glow && trend !== undefined
+    ? (Number(trend) >= 0 ? " pnl-positive" : " pnl-negative")
+    : "";
   return (
-    <article className="metric">
+    <article className={`metric${glowClass}`}>
       <div className="metric-label">
         {icon}
         <span>{label}</span>
       </div>
-      <strong>{value}</strong>
+      <strong className={trend !== undefined ? signedClass(trend) : ""}>{value}</strong>
       <small className={trend === undefined ? "" : signedClass(trend)}>{sub}</small>
     </article>
   );
@@ -725,6 +782,134 @@ function TradeLedger({ trades }) {
   );
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   PROFESSIONAL TRADE HISTORY — expandable rows, realized PnL, pagination
+   ══════════════════════════════════════════════════════════════════════ */
+function TradeHistoryPanel({ data, page, onPageChange }) {
+  const [expandedRow, setExpandedRow] = useState(null);
+  const trades = data?.trades || [];
+  const totalPages = data?.total_pages || 1;
+
+  return (
+    <div>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Date</th>
+              <th>Ticker</th>
+              <th>Action</th>
+              <th>Qty</th>
+              <th>Price</th>
+              <th>Total</th>
+              <th>Realized P&L</th>
+              <th>Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            {trades.length ? (
+              trades.map((trade, idx) => (
+                <TradeHistoryRow
+                  key={`${trade.timestamp}-${trade.ticker}-${idx}`}
+                  trade={trade}
+                  isExpanded={expandedRow === idx}
+                  onToggle={() => setExpandedRow(expandedRow === idx ? null : idx)}
+                />
+              ))
+            ) : (
+              <tr>
+                <td colSpan="9" style={{textAlign:'center',padding:24,color:'var(--muted)'}}>
+                  No trade history available. Run an analysis cycle to generate trades.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="pagination">
+          <button
+            disabled={page <= 1}
+            onClick={() => onPageChange(page - 1)}
+          >
+            <ChevronLeft size={14} />
+          </button>
+          {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+            const pageNum = i + 1;
+            return (
+              <button
+                key={pageNum}
+                className={page === pageNum ? "active" : ""}
+                onClick={() => onPageChange(pageNum)}
+              >
+                {pageNum}
+              </button>
+            );
+          })}
+          {totalPages > 7 && <span>...</span>}
+          <button
+            disabled={page >= totalPages}
+            onClick={() => onPageChange(page + 1)}
+          >
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TradeHistoryRow({ trade, isExpanded, onToggle }) {
+  const hasPnl = trade.realized_pnl !== null && trade.realized_pnl !== undefined;
+  return (
+    <>
+      <tr onClick={onToggle} style={{cursor:'pointer'}}>
+        <td style={{width:28,padding:'10px 6px'}}>
+          <ChevronDown
+            size={14}
+            style={{
+              transition: 'transform 200ms ease',
+              transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+              color: 'var(--muted)',
+            }}
+          />
+        </td>
+        <td>{dateTime(trade.timestamp)}</td>
+        <td style={{fontWeight:700}}>{trade.ticker}</td>
+        <td><ActionPill action={trade.action} /></td>
+        <td>{Number(trade.quantity || 0).toLocaleString("en-IN")}</td>
+        <td>{money(trade.price)}</td>
+        <td>{money(trade.total_value)}</td>
+        <td className={hasPnl ? signedClass(trade.realized_pnl) : ''}>
+          {hasPnl ? (
+            <>{money(trade.realized_pnl)} ({percent(trade.realized_pnl_pct)})</>
+          ) : (
+            <span style={{color:'var(--muted)'}}>—</span>
+          )}
+        </td>
+        <td>{trade.final_score ? trade.final_score.toFixed(2) : '—'}</td>
+      </tr>
+      {isExpanded && (
+        <tr className="trade-row-expanded">
+          <td colSpan="9">
+            <div className="trade-reasoning-label">AI Reasoning</div>
+            <div>{trade.ai_reasoning || "No reasoning recorded for this trade."}</div>
+            <div className="trade-reasoning-scores">
+              <span>ML Conf: <strong>{probability(trade.ml_confidence)}</strong></span>
+              <span>Gemini: <strong>{probability(trade.gemini_confidence)}</strong></span>
+              <span>Score: <strong>{trade.final_score?.toFixed(3) || '—'}</strong></span>
+              {trade.crisis_detected && <span style={{color:'var(--red)'}}>⚠ CRISIS</span>}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 function NewsPanel({ analysis, news, ticker }) {
   const headlines = analysis?.news_headlines || [];
   const macroNews = news?.macro_news || [];
@@ -786,7 +971,7 @@ function NewsPanel({ analysis, news, ticker }) {
   );
 }
 
-function HoldingsPanel({ holdings, cash, riskStatus, sectorAllocation }) {
+function HoldingsPanel({ holdings, cash, riskStatus, sectorAllocation, stopPct = 0.08 }) {
   return (
     <article className="detail-panel">
       <div className="panel-title-row compact">
@@ -795,25 +980,26 @@ function HoldingsPanel({ holdings, cash, riskStatus, sectorAllocation }) {
             <Wallet size={18} />
             Portfolio Holdings
           </h2>
-          <span>Live-priced positions with risk controls</span>
+          <span>Live-priced positions with trailing stop protection</span>
         </div>
       </div>
 
       {/* Risk Status Bar */}
       {riskStatus && (
-        <div style={{padding:'6px 12px',fontSize:'0.78rem',display:'flex',gap:12,flexWrap:'wrap',borderBottom:'1px solid var(--border)',color:'var(--text-muted)'}}>
-          <span>Stop-Loss: <strong>{riskStatus.stop_loss_pct?.toFixed(0) || 7}%</strong></span>
-          <span>Max/Sector: <strong>{riskStatus.max_sector_stocks || 3}</strong></span>
+        <div style={{padding:'8px 12px',fontSize:'0.75rem',display:'flex',gap:12,flexWrap:'wrap',borderBottom:'1px solid var(--border)',color:'var(--muted)'}}>
+          <span>Stop-Loss: <strong style={{color:'var(--text)'}}>{riskStatus.stop_loss_pct?.toFixed(0) || 7}%</strong></span>
+          <span>Trailing: <strong style={{color:'var(--text)'}}>{(stopPct * 100).toFixed(0)}%</strong></span>
+          <span>Max/Sector: <strong style={{color:'var(--text)'}}>{riskStatus.max_sector_stocks || 3}</strong></span>
           <span>Drawdown: <strong className={riskStatus.buying_halted ? 'negative' : ''}>{riskStatus.drawdown_pct?.toFixed(1) || '0.0'}%</strong> / {riskStatus.drawdown_limit?.toFixed(0) || 15}%</span>
-          {riskStatus.buying_halted && <span className="action-pill sell" style={{fontSize:'0.7rem'}}>BUYING HALTED</span>}
+          {riskStatus.buying_halted && <span className="action-pill sell" style={{fontSize:'0.65rem'}}>BUYING HALTED</span>}
         </div>
       )}
 
       {/* Sector Allocation */}
       {sectorAllocation && Object.keys(sectorAllocation).length > 0 && (
-        <div style={{padding:'6px 12px',fontSize:'0.78rem',display:'flex',gap:8,flexWrap:'wrap',borderBottom:'1px solid var(--border)'}}>
+        <div style={{padding:'6px 12px',fontSize:'0.72rem',display:'flex',gap:6,flexWrap:'wrap',borderBottom:'1px solid var(--border)'}}>
           {Object.entries(sectorAllocation).map(([sector, value]) => (
-            <span key={sector} style={{background:'var(--bg-hover)',padding:'2px 8px',borderRadius:4}}>
+            <span key={sector} style={{background:'var(--panel-2)',padding:'2px 8px',borderRadius:4}}>
               {sector}: <strong>{money(value)}</strong>
             </span>
           ))}
@@ -822,23 +1008,51 @@ function HoldingsPanel({ holdings, cash, riskStatus, sectorAllocation }) {
 
       <div className="holdings-list">
         {holdings.length ? (
-          holdings.map((holding) => (
-            <div className="holding-row" key={holding.ticker}>
-              <div>
-                <strong>{holding.ticker}</strong>
-                <small>
-                  {holding.quantity} shares at avg {money(holding.avg_price)}
-                  {holding.sector && <span style={{marginLeft:6,opacity:0.6}}>• {holding.sector}</span>}
-                </small>
+          holdings.map((holding) => {
+            // Calculate trailing stop distance
+            const peakPrice = holding.peak_price || holding.avg_price || 0;
+            const currentPrice = holding.current_price || holding.avg_price || 0;
+            const trailingStopPrice = peakPrice * (1 - stopPct);
+            const distancePct = currentPrice > 0 ? ((currentPrice - trailingStopPrice) / currentPrice) * 100 : 0;
+            const distanceClamped = Math.max(0, Math.min(100, distancePct));
+            const stopZone = distanceClamped > 5 ? 'safe' : distanceClamped > 2 ? 'warning' : 'danger';
+
+            return (
+              <div className="holding-row" key={holding.ticker} style={{gridTemplateColumns:'1fr'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
+                  <div>
+                    <strong>{holding.ticker}</strong>
+                    <small>
+                      {holding.quantity} shares at avg {money(holding.avg_price)}
+                      {holding.sector && <span style={{marginLeft:6,opacity:0.6}}>• {holding.sector}</span>}
+                    </small>
+                  </div>
+                  <div className="holding-values">
+                    <strong className={signedClass(holding.unrealized_pnl)}>{money(holding.market_value)}</strong>
+                    <small className={signedClass(holding.unrealized_pnl)}>
+                      {money(holding.unrealized_pnl)} ({percent(holding.unrealized_pnl_pct)})
+                    </small>
+                  </div>
+                </div>
+
+                {/* Trailing Stop Distance Indicator */}
+                {peakPrice > 0 && (
+                  <div className="stop-distance">
+                    <Target size={12} style={{color:'var(--muted)',flexShrink:0}} />
+                    <div className="stop-bar-track">
+                      <div
+                        className={`stop-bar-fill ${stopZone}`}
+                        style={{width: `${Math.min(100, distanceClamped * 10)}%`}}
+                      />
+                    </div>
+                    <span className={`stop-label ${stopZone}`}>
+                      {distancePct.toFixed(1)}% to stop
+                    </span>
+                  </div>
+                )}
               </div>
-              <div className="holding-values">
-                <strong>{money(holding.market_value)}</strong>
-                <small className={signedClass(holding.unrealized_pnl)}>
-                  {money(holding.unrealized_pnl)} ({percent(holding.unrealized_pnl_pct)})
-                </small>
-              </div>
-            </div>
-          ))
+            );
+          })
         ) : (
           <div className="holding-row">
             <div>

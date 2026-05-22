@@ -130,14 +130,26 @@ async def update_portfolio_valuation(live_prices: dict) -> dict:
         ticker = h["ticker"]
         current_price = live_prices.get(ticker) or h.get("avg_price", 0)
         qty = h.get("quantity", 0)
+        avg_price = h.get("avg_price", 0)
 
         market_value = current_price * qty
         holdings_value += market_value
 
-        # Update peak_price for trailing stop
-        peak = h.get("peak_price", h.get("avg_price", 0))
+        # Update live valuation fields on the holding
+        h["current_price"] = round(current_price, 2)
+        h["market_value"] = round(market_value, 2)
+        h["unrealized_pnl"] = round((current_price - avg_price) * qty, 2) if avg_price > 0 else 0.0
+        h["unrealized_pnl_pct"] = round(
+            ((current_price - avg_price) / avg_price) * 100, 2
+        ) if avg_price > 0 else 0.0
+
+        # Update peak_price for trailing stop (always track the highest price seen)
+        peak = h.get("peak_price", avg_price or current_price)
         if current_price > peak:
-            h["peak_price"] = current_price
+            h["peak_price"] = round(current_price, 2)
+        elif peak == 0:
+            # Ensure peak_price is never 0
+            h["peak_price"] = round(max(current_price, avg_price), 2)
 
     total_value = cash + holdings_value
     initial = portfolio.get("initial_balance", settings.initial_balance)

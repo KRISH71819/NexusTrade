@@ -39,4 +39,8 @@ export const api = {
   // News Intelligence
   latestNews: () => request("/api/news/latest"),
   tickerNews: (ticker) => request(`/api/news/${encodeURIComponent(ticker)}`),
+  // Analytics
+  pnlAnalytics: () => request("/api/analytics/pnl"),
+  tradeHistory: (page = 1, pageSize = 50) =>
+    request(`/api/analytics/trade-history?page=${page}&page_size=${pageSize}`),
 };
