@@ -10,6 +10,7 @@ Final Score = (
 
 Decision Rules:
     BUY:  final_score > 0.60 AND crisis_detected == False AND risk_approved
+          AND market_regime == BULLISH AND volume_ratio >= 1.2
     SELL: final_score < 0.30 OR crisis_detected OR stop_loss_hit
     HOLD: everything else
 """
@@ -61,6 +62,8 @@ def decide_action(
     crisis_detected: bool,
     risk_assessment: RiskAssessment,
     has_position: bool,
+    market_regime: str = "BULLISH",
+    volume_ratio: float = 1.0,
 ) -> TradeAction:
     """
     Decision matrix using weighted score + override conditions.
@@ -68,7 +71,9 @@ def decide_action(
     Priority order:
     1. Crisis -> SELL (if holding) or HOLD (if not)
     2. Stop-loss/trailing stop hit -> SELL
-    3. Score-based decision with risk gates
+    3. Market regime gate (bearish → block new BUYs)
+    4. Volume confirmation gate (weak volume → block new BUYs)
+    5. Score-based decision with risk gates
     """
     # ── Override 1: Crisis (SMART — severity-based) ────────────────────────
     # Only hard-block on SEVERE crises (severity >= 0.7)
@@ -101,8 +106,34 @@ def decide_action(
     # ── Override 3: Drawdown halt (no new buys) ──────────────────────────
     drawdown_halt = risk_assessment.portfolio_drawdown_pct > settings.max_drawdown_pct
 
+    # ── Override 4: MARKET REGIME GATE (bearish → block all new BUYs) ────
+    # Professional funds NEVER initiate new long positions in a confirmed
+    # downtrend. Existing positions are managed by trailing stops.
+    regime_blocked = False
+    if market_regime == "BEARISH" and not has_position:
+        regime_blocked = True
+        logger.info(
+            f"REGIME GATE: Market is BEARISH (NIFTY < SMA50) → blocking new BUY. "
+            f"Score={final_score:.2f} would have qualified otherwise."
+        )
+
+    # ── Override 5: VOLUME CONFIRMATION GATE ─────────────────────────────
+    # Don't buy breakouts on weak volume — they're statistically more likely
+    # to be false signals. Require volume ≥ 1.2× 20-day average.
+    volume_blocked = False
+    if volume_ratio < settings.min_volume_ratio and not has_position:
+        volume_blocked = True
+        logger.info(
+            f"VOLUME GATE: Volume ratio {volume_ratio:.2f}x < "
+            f"{settings.min_volume_ratio}x required → blocking BUY"
+        )
+
     # ── Score-based decision ─────────────────────────────────────────────
-    if final_score >= 0.60 and not drawdown_halt and risk_assessment.risk_approved:
+    if (final_score >= 0.60
+            and not drawdown_halt
+            and not regime_blocked
+            and not volume_blocked
+            and risk_assessment.risk_approved):
         # Additional check: Gemini must also agree (or at least not disagree)
         if gemini_action in ("BUY", "HOLD"):
             return TradeAction.BUY
@@ -136,6 +167,8 @@ def build_action_reason(
     gemini_reasoning: str = "",
     risk_flags: list = None,
     crisis_detected: bool = False,
+    market_regime: str = "BULLISH",
+    volume_ratio: float = 1.0,
 ) -> str:
     """Build a human-readable, fully transparent reason for the trade decision."""
 
@@ -147,12 +180,16 @@ def build_action_reason(
         f"Risk {risk_adjustment:+.2f} × {settings.weight_risk:.0%}]"
     )
 
+    # Add regime and volume context
+    regime_info = f" Regime: {market_regime}."
+    volume_info = f" Vol: {volume_ratio:.1f}x avg." if volume_ratio != 1.0 else ""
+
     if crisis_detected:
-        reason = f"CRISIS OVERRIDE: {gemini_reasoning[:200]}. {score_breakdown}"
+        reason = f"CRISIS OVERRIDE: {gemini_reasoning[:200]}. {score_breakdown}{regime_info}"
     elif action == TradeAction.BUY:
         reason = (
             f"BUY signal: {score_breakdown}. "
-            f"Gemini: {gemini_reasoning[:200]}"
+            f"Gemini: {gemini_reasoning[:200]}{regime_info}{volume_info}"
         )
     elif action == TradeAction.SELL:
         risk_info = ""
@@ -160,13 +197,18 @@ def build_action_reason(
             risk_info = f" Risk: {'; '.join(risk_flags[:3])}."
         reason = (
             f"SELL signal: {score_breakdown}. "
-            f"Gemini: {gemini_reasoning[:200]}.{risk_info}"
+            f"Gemini: {gemini_reasoning[:200]}.{risk_info}{regime_info}"
         )
     else:
+        blocked_reason = ""
+        if market_regime == "BEARISH":
+            blocked_reason = " BEARISH REGIME: new buys blocked."
+        if volume_ratio < settings.min_volume_ratio:
+            blocked_reason += f" LOW VOLUME ({volume_ratio:.1f}x): buy blocked."
         reason = (
             f"HOLD: {score_breakdown}. "
             f"Neither BUY (≥0.60) nor SELL (<0.30) threshold met. "
-            f"Gemini: {gemini_reasoning[:150]}"
+            f"Gemini: {gemini_reasoning[:150]}{blocked_reason}{regime_info}"
         )
 
     return reason

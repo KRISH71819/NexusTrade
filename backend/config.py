@@ -60,6 +60,30 @@ class Settings(BaseSettings):
     rotation_min_score_gap: float = 0.25       # min score advantage for a swap
     rotation_min_hold_hours: float = 24.0      # must hold at least 24h before rotation
 
+    # ── Market Regime Filter ────────────────────────────────────────────
+    market_regime_index: str = "^NSEI"            # NIFTY 50 index symbol
+    market_regime_sma_period: int = 50            # 50-day SMA for bull/bear regime
+    bearish_trailing_stop_pct: float = 0.04       # tighter 4% trailing in bear markets
+
+    # ── ATR-Based Position Sizing ────────────────────────────────────────
+    atr_risk_per_trade_pct: float = 0.01          # risk 1% of portfolio per trade
+    atr_stop_multiplier: float = 1.5              # stop-loss at 1.5× ATR below entry
+
+    # ── Scale-Out Profit Taking (two-tier, replaces old single tier) ─────
+    profit_take_tier1_pct: float = 0.08           # +8% gain → sell 33%
+    profit_take_tier1_sell_pct: float = 0.33      # fraction to sell at tier 1
+    profit_take_tier2_pct: float = 0.15           # +15% gain → sell another 33%
+    profit_take_tier2_sell_pct: float = 0.33      # fraction to sell at tier 2
+
+    # ── Sector Concentration (value-based cap) ───────────────────────────
+    max_sector_value_pct: float = 0.25            # 25% of portfolio value per sector
+
+    # ── Slippage & Friction Simulation ───────────────────────────────────
+    slippage_bps: float = 15.0                    # 15 basis points (0.15%) per trade
+
+    # ── Volume Confirmation Gate ─────────────────────────────────────────
+    min_volume_ratio: float = 1.2                 # require volume ≥ 1.2× 20-day avg
+
     # ── Capital Allocation (diversification, not safety) ─────────────────
     max_open_positions: int = 15               # max concurrent holdings
     max_single_trade_pct: float = 0.10         # cap any single trade at 10% of portfolio

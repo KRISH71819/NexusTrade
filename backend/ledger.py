@@ -196,11 +196,23 @@ async def execute_buy(
     analysis: AnalysisResult,
     quantity: Optional[int] = None,
     max_position_pct: Optional[float] = None,
+    atr: Optional[float] = None,
 ) -> dict:
     """
-    Execute a virtual BUY order.
-    If quantity is None, auto-size based on max_position_pct.
+    Execute a virtual BUY order with slippage simulation.
+    If quantity is None, auto-size based on max_position_pct AND ATR risk.
     """
+    # ── SLIPPAGE SIMULATION: add 0.15% premium to BUY price ─────────────
+    # Real-world buys execute slightly above market price due to:
+    # STT (~0.1%), brokerage (~0.03%), market impact (~0.02%)
+    market_price = price
+    slippage_mult = 1 + (settings.slippage_bps / 10_000)
+    price = round(price * slippage_mult, 2)
+    logger.info(
+        f"[SLIPPAGE] {ticker} BUY: Market Rs.{market_price:.2f} → "
+        f"Execution Rs.{price:.2f} (+{settings.slippage_bps:.0f}bps)"
+    )
+
     portfolio = await get_portfolio()
     cash = portfolio["cash"]
 
@@ -234,7 +246,28 @@ async def execute_buy(
         return {"error": "Insufficient funds", "ticker": ticker}
 
     if quantity is None:
-        quantity = int(available // price)
+        # ── Confidence-based quantity (existing logic) ─────────────────
+        confidence_qty = int(available // price)
+
+        # ── ATR-based quantity cap (volatility-adjusted sizing) ─────────
+        # Professional position sizing: risk 1% of portfolio per trade,
+        # with stop at 1.5× ATR below entry. This means volatile stocks
+        # automatically get smaller positions.
+        if atr and atr > 0:
+            risk_budget = portfolio["total_value"] * settings.atr_risk_per_trade_pct
+            atr_stop_distance = atr * settings.atr_stop_multiplier
+            atr_qty = int(risk_budget / atr_stop_distance) if atr_stop_distance > 0 else confidence_qty
+
+            if atr_qty < confidence_qty:
+                logger.info(
+                    f"[ATR SIZING] {ticker}: ATR=Rs.{atr:.2f}, "
+                    f"stop distance=Rs.{atr_stop_distance:.2f}, "
+                    f"ATR qty={atr_qty} < confidence qty={confidence_qty}. "
+                    f"Using ATR cap for volatility-adjusted sizing."
+                )
+            quantity = min(confidence_qty, atr_qty)
+        else:
+            quantity = confidence_qty
 
     if quantity <= 0:
         return {"error": "Computed quantity is 0", "ticker": ticker}
@@ -271,6 +304,8 @@ async def execute_buy(
             "peak_price": round(price, 2),
             "sector": get_sector(ticker),
             "bought_at": datetime.now(timezone.utc),
+            "profit_taken_tiers": [],       # tracks which profit tiers have fired
+            "locked_stop_price": None,       # break-even lock after tier 1
         })
 
     # Compute new total value using live price for all holdings
@@ -340,9 +375,18 @@ async def execute_sell(
     quantity: Optional[int] = None,
 ) -> dict:
     """
-    Execute a virtual SELL order.
+    Execute a virtual SELL order with slippage simulation.
     If quantity is None, sell the entire position.
     """
+    # ── SLIPPAGE SIMULATION: subtract 0.15% from SELL price ───────────
+    market_price = price
+    slippage_mult = 1 - (settings.slippage_bps / 10_000)
+    price = round(price * slippage_mult, 2)
+    logger.info(
+        f"[SLIPPAGE] {ticker} SELL: Market Rs.{market_price:.2f} → "
+        f"Execution Rs.{price:.2f} (-{settings.slippage_bps:.0f}bps)"
+    )
+
     portfolio = await get_portfolio()
     holdings = portfolio.get("holdings", [])
 

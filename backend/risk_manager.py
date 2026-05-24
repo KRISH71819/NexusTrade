@@ -61,7 +61,7 @@ def assess_risk(
         risk_flags.append("CRISIS DETECTED: Market crisis event identified. BUY blocked.")
         risk_approved = False
 
-    # ── 3. Sector Concentration ──────────────────────────────────────────
+    # ── 3. Sector Concentration (count-based) ─────────────────────────────
     holdings = portfolio.get("holdings", [])
     sector_count = sum(
         1 for h in holdings
@@ -71,10 +71,29 @@ def assess_risk(
 
     if sector_count >= settings.max_sector_stocks:
         risk_flags.append(
-            f"SECTOR LIMIT: Already hold {sector_count} stocks in {sector} "
+            f"SECTOR COUNT LIMIT: Already hold {sector_count} stocks in {sector} "
             f"(limit: {settings.max_sector_stocks})"
         )
         risk_approved = False
+
+    # ── 3a. Sector Concentration (VALUE-BASED — 25% cap) ─────────────────
+    # Count-based limits are insufficient: 3 large-cap banking positions
+    # could be 60% of portfolio. This value-based gate prevents that.
+    sector_market_value = sum(
+        h.get("quantity", 0) * h.get("current_price", h.get("avg_price", 0))
+        for h in holdings
+        if get_sector(h.get("ticker", "")) == sector
+        and h.get("ticker") != ticker
+    )
+    total_portfolio_value = portfolio.get("total_value", settings.initial_balance)
+    if total_portfolio_value > 0:
+        sector_pct = sector_market_value / total_portfolio_value
+        if sector_pct >= settings.max_sector_value_pct:
+            risk_flags.append(
+                f"SECTOR VALUE LIMIT: {sector} sector is {sector_pct:.1%} of portfolio "
+                f"(limit: {settings.max_sector_value_pct:.0%})"
+            )
+            risk_approved = False
 
     # ── 3b. Max Open Positions ───────────────────────────────────────────
     holdings_count = len([h for h in holdings if h.get("quantity", 0) > 0])
@@ -170,14 +189,22 @@ def assess_risk(
     )
 
 
-def check_stop_losses(portfolio: dict, current_prices: Dict[str, float]) -> List[dict]:
+def check_stop_losses(
+    portfolio: dict,
+    current_prices: Dict[str, float],
+    market_regime: str = "BULLISH",
+) -> List[dict]:
     """
     Scan all holdings for stop-loss and trailing stop triggers.
     Returns a list of tickers that should be sold.
 
+    In BEARISH regime, trailing stop tightens from 8% to 4% to protect
+    capital faster when the broad market is declining.
+
     Args:
         portfolio: current portfolio state
         current_prices: {ticker: latest_price} mapping
+        market_regime: 'BULLISH' or 'BEARISH' — affects trailing stop width
 
     Returns:
         List of dicts: [{"ticker": str, "reason": str, "price": float}, ...]
@@ -209,12 +236,33 @@ def check_stop_losses(portfolio: dict, current_prices: Dict[str, float]) -> List
             })
             continue
 
-        # ── STRICT TRAILING STOP (always-on, no activation gate) ─────────
-        # If peak_price is tracked and price has dropped X% from peak, sell.
-        # This protects profits even on stocks that never rallied past the
-        # activation threshold. Uses trailing_stop_strict_pct (default 8%).
+        # ── BREAK-EVEN LOCK (from profit-taking tier 1) ────────────────────
+        # If we've already taken partial profit at +8%, the stop for the
+        # remaining position is locked at the entry price (break-even).
+        locked_stop = holding.get("locked_stop_price")
+        if locked_stop and locked_stop > 0 and current_price <= locked_stop:
+            sell_signals.append({
+                "ticker": ticker,
+                "reason": (
+                    f"BREAK-EVEN STOP HIT: Price Rs.{current_price:.2f} hit locked "
+                    f"stop Rs.{locked_stop:.2f} (set after profit-taking tier 1)"
+                ),
+                "price": current_price,
+                "trigger": "locked_stop",
+            })
+            continue
+
+        # ── STRICT TRAILING STOP (always-on, regime-adaptive) ────────────
+        # In BEARISH regime: tighten from 8% to 4% (protect capital faster)
+        # In BULLISH regime: use normal 8% trailing stop
+        effective_trailing_pct = (
+            settings.bearish_trailing_stop_pct
+            if market_regime == "BEARISH"
+            else settings.trailing_stop_strict_pct
+        )
+
         if peak_price > avg_price:  # only meaningful if we've seen gains
-            strict_stop_price = peak_price * (1 - settings.trailing_stop_strict_pct)
+            strict_stop_price = peak_price * (1 - effective_trailing_pct)
             if current_price <= strict_stop_price:
                 drop_pct = (peak_price - current_price) / peak_price
                 sell_signals.append({
@@ -222,7 +270,8 @@ def check_stop_losses(portfolio: dict, current_prices: Dict[str, float]) -> List
                     "reason": (
                         f"TRAILING STOP HIT: Price Rs.{current_price:.2f} dropped "
                         f"{drop_pct:.1%} from peak Rs.{peak_price:.2f} "
-                        f"(strict {settings.trailing_stop_strict_pct:.0%} trailing stop)"
+                        f"({effective_trailing_pct:.0%} trailing stop, "
+                        f"regime={market_regime})"
                     ),
                     "price": current_price,
                     "trigger": "trailing_stop_strict",
@@ -437,14 +486,18 @@ def check_profit_taking(
     current_prices: Dict[str, float],
 ) -> List[dict]:
     """
-    Check for holdings that have gained enough to warrant partial profit-taking.
+    Two-Tier Scale-Out Profit Taking — institutional-grade exit strategy.
 
-    When a stock is up 20%+ from entry, sell 25% of the position to:
-    - Lock in real gains
-    - Reduce risk exposure
-    - Free up capital for new opportunities
+    Tier 1 (+8% gain): Sell 33% of position, lock stop at entry (break-even)
+    Tier 2 (+15% gain): Sell another 33%, trail remainder with 5% stop
 
-    Only triggers ONCE per threshold crossing (tracked via peak_price).
+    Each tier fires ONCE per holding (tracked via profit_taken_tiers list).
+    This replaces the old single-threshold system.
+
+    Why two tiers:
+    - Tier 1 locks real profit and eliminates downside risk on remainder
+    - Tier 2 captures the bulk of the move while keeping a runner position
+    - The runner rides momentum with a tight trailing stop
     """
     sell_signals = []
     holdings = portfolio.get("holdings", [])
@@ -454,38 +507,71 @@ def check_profit_taking(
         avg_price = holding.get("avg_price", 0)
         quantity = holding.get("quantity", 0)
         current_price = current_prices.get(ticker, 0)
+        taken_tiers = holding.get("profit_taken_tiers", [])
 
         if not current_price or not avg_price or quantity <= 1:
             continue
 
         gain_pct = (current_price - avg_price) / avg_price if avg_price > 0 else 0
 
-        # Only take profit if gain exceeds threshold
-        if gain_pct >= settings.profit_take_threshold_pct:
-            # Calculate shares to sell (25% of position, minimum 1)
-            shares_to_sell = max(1, int(quantity * settings.profit_take_partial_pct))
+        # ── TIER 2: +15% gain — sell another 33% ────────────────────────
+        # Check tier 2 first (higher priority if both thresholds crossed)
+        if (gain_pct >= settings.profit_take_tier2_pct
+                and "tier2" not in taken_tiers
+                and "tier1" in taken_tiers):  # tier 1 must have fired first
 
-            # Don't sell everything — keep at least 1 share
+            shares_to_sell = max(1, int(quantity * settings.profit_take_tier2_sell_pct))
             if shares_to_sell >= quantity:
                 shares_to_sell = max(1, quantity - 1)
 
-            profit_value = shares_to_sell * current_price
             profit_realized = shares_to_sell * (current_price - avg_price)
 
             sell_signals.append({
                 "ticker": ticker,
                 "reason": (
-                    f"PROFIT TAKING: {ticker} up {gain_pct:.1%} "
+                    f"PROFIT TIER 2: {ticker} up {gain_pct:.1%} "
                     f"(Rs.{avg_price:.2f} → Rs.{current_price:.2f}). "
-                    f"Selling {shares_to_sell}/{quantity} shares to lock "
-                    f"Rs.{profit_realized:.2f} profit"
+                    f"Selling {shares_to_sell}/{quantity} shares (tier 2). "
+                    f"Locking Rs.{profit_realized:.2f} profit. "
+                    f"Remainder rides with 5% trailing stop."
                 ),
                 "price": current_price,
-                "trigger": "profit_taking",
+                "trigger": "profit_taking_tier2",
                 "sell_all": False,
                 "sell_quantity": shares_to_sell,
                 "pnl_pct": round(gain_pct, 4),
                 "profit_realized": round(profit_realized, 2),
+                "tier": "tier2",
+            })
+            continue  # don't double-fire tier 1
+
+        # ── TIER 1: +8% gain — sell 33%, lock break-even stop ────────────
+        if (gain_pct >= settings.profit_take_tier1_pct
+                and "tier1" not in taken_tiers):
+
+            shares_to_sell = max(1, int(quantity * settings.profit_take_tier1_sell_pct))
+            if shares_to_sell >= quantity:
+                shares_to_sell = max(1, quantity - 1)
+
+            profit_realized = shares_to_sell * (current_price - avg_price)
+
+            sell_signals.append({
+                "ticker": ticker,
+                "reason": (
+                    f"PROFIT TIER 1: {ticker} up {gain_pct:.1%} "
+                    f"(Rs.{avg_price:.2f} → Rs.{current_price:.2f}). "
+                    f"Selling {shares_to_sell}/{quantity} shares (tier 1). "
+                    f"Locking Rs.{profit_realized:.2f}. "
+                    f"Stop moved to break-even Rs.{avg_price:.2f}."
+                ),
+                "price": current_price,
+                "trigger": "profit_taking_tier1",
+                "sell_all": False,
+                "sell_quantity": shares_to_sell,
+                "pnl_pct": round(gain_pct, 4),
+                "profit_realized": round(profit_realized, 2),
+                "tier": "tier1",
+                "lock_stop_at": round(avg_price, 2),  # signal to lock break-even
             })
 
     if sell_signals:

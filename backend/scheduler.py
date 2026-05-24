@@ -22,6 +22,8 @@ from data_ingestion import (
     bulk_screener,
     ingest_ticker_data,
     get_batch_prices,
+    fetch_market_regime,
+    fetch_daily_atr,
 )
 from news_intelligence import fetch_news_intelligence, get_sector
 from ml_engine import predict_trend
@@ -129,6 +131,23 @@ async def run_analysis_cycle(force: bool = False):
             f"ALL getting full LLM analysis"
         )
 
+        # ── Step 2.5: Fetch Market Regime (once per cycle) ───────────────
+        # Determines BULLISH/BEARISH based on NIFTY 50 vs 50-day SMA.
+        # This is used to gate new BUYs and tighten trailing stops.
+        try:
+            market_regime_data = await asyncio.to_thread(fetch_market_regime)
+        except Exception as e:
+            logger.warning(f"Market regime fetch failed: {e}. Defaulting to BULLISH.")
+            market_regime_data = {"regime": "BULLISH", "nifty_close": 0, "nifty_sma50": 0, "gap_pct": 0}
+
+        market_regime = market_regime_data["regime"]
+        logger.info(
+            f"MARKET REGIME: {market_regime} | "
+            f"NIFTY={market_regime_data['nifty_close']:,.2f} vs "
+            f"SMA50={market_regime_data['nifty_sma50']:,.2f} "
+            f"(gap {market_regime_data['gap_pct']:+.2f}%)"
+        )
+
         # ── Step 3: Full LLM analysis for ALL tickers ────────────────────
         # Prioritize held stocks first (need timely SELL decisions),
         # then process new candidates sorted by screener ranking
@@ -145,7 +164,7 @@ async def run_analysis_cycle(force: bool = False):
                 # 120s timeout per ticker — prevents a single hung request
                 # from freezing the entire cycle for hours
                 result = await asyncio.wait_for(
-                    _analyze_single_ticker(ticker, portfolio),
+                    _analyze_single_ticker(ticker, portfolio, market_regime),
                     timeout=120.0,
                 )
                 results.append(result)
@@ -163,7 +182,7 @@ async def run_analysis_cycle(force: bool = False):
         # candidates. This replaces the old portfolio rotation logic.
         batch_stats = {"sells": 0, "buys": 0, "partial_sells": 0}
         try:
-            batch_stats = await _execute_batch_decisions(results)
+            batch_stats = await _execute_batch_decisions(results, market_regime)
             logger.info(
                 f"BATCH OPTIMIZER: {batch_stats['sells']} full sell(s), "
                 f"{batch_stats['partial_sells']} partial sell(s), "
@@ -224,7 +243,11 @@ async def run_analysis_cycle(force: bool = False):
 
 
 
-async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
+async def _analyze_single_ticker(
+    ticker: str,
+    portfolio: dict,
+    market_regime: str = "BULLISH",
+) -> dict:
     """
     Full analysis pipeline for a single ticker:
     1. Ingest market data + compute indicators
@@ -233,8 +256,8 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
     4. Run Gemini structured analysis
     5. Assess risk
     6. Compute final score
-    7. Decide action
-    8. Execute trade if BUY/SELL
+    7. Decide action (with regime + volume gates)
+    8. Return analysis (batch optimizer handles execution)
     """
 
     # ── 1. Data Ingestion ────────────────────────────────────────────────
@@ -349,14 +372,18 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
         risk_adjustment=risk_adjustment,
     )
 
-    # ── 7. Decide Action ────────────────────────────────────────────────
+    # ── 7. Decide Action (with regime + volume gates) ──────────────────
     is_holding = await has_position(ticker)
+    volume_ratio = indicators.get("volume_ratio", 1.0)
+
     action = decide_action(
         final_score=final_score,
         gemini_action=gemini_action,
         crisis_detected=crisis_detected,
         risk_assessment=risk_assessment,
         has_position=is_holding,
+        market_regime=market_regime,
+        volume_ratio=volume_ratio,
     )
 
     action_reason = build_action_reason(
@@ -369,6 +396,8 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
         gemini_reasoning=gemini_result.get("reasoning", ""),
         risk_flags=risk_assessment.risk_flags,
         crisis_detected=crisis_detected,
+        market_regime=market_regime,
+        volume_ratio=volume_ratio,
     )
 
     # ── Build AnalysisResult ─────────────────────────────────────────────
@@ -421,7 +450,7 @@ async def _analyze_single_ticker(ticker: str, portfolio: dict) -> dict:
 #   BATCH PORTFOLIO OPTIMIZER — Score everything, then trade smart
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _execute_batch_decisions(cycle_results: list) -> dict:
+async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BULLISH") -> dict:
     """
     Batch Portfolio Optimizer — the brain of the trading system.
 
@@ -577,11 +606,19 @@ async def _execute_batch_decisions(cycle_results: list) -> dict:
             settings.max_single_trade_pct,  # per-trade diversification cap
         )
 
+        # ── Fetch daily ATR for volatility-adjusted position sizing ─────
+        daily_atr = None
+        try:
+            daily_atr = await asyncio.to_thread(fetch_daily_atr, ticker)
+        except Exception as e:
+            logger.debug(f"Could not fetch daily ATR for {ticker}: {e}")
+
         trade = await execute_buy(
             ticker=ticker,
             price=price,
             analysis=analysis,
             max_position_pct=max_pos_pct,
+            atr=daily_atr,
         )
 
         if "error" not in trade:
@@ -685,6 +722,7 @@ async def _execute_batch_decisions(cycle_results: list) -> dict:
                         price=price,
                         analysis=analysis,
                         max_position_pct=max_pos_pct,
+                        atr=daily_atr,
                     )
 
                     if "error" not in retry_trade:
@@ -759,7 +797,14 @@ async def run_risk_check():
         total_sells = 0
 
         # ── 1. Stop-Loss / Trailing Stop (hard rules — execute immediately) ──
-        stop_signals = check_stop_losses(portfolio, live_prices)
+        # In BEARISH regime, trailing stop tightens from 8% to 4%
+        try:
+            regime_data = await asyncio.to_thread(fetch_market_regime)
+            risk_regime = regime_data.get("regime", "BULLISH")
+        except Exception:
+            risk_regime = "BULLISH"
+
+        stop_signals = check_stop_losses(portfolio, live_prices, market_regime=risk_regime)
 
         for signal in stop_signals:
             ticker = signal["ticker"]
@@ -858,6 +903,35 @@ async def run_risk_check():
             if "error" not in trade:
                 asyncio.create_task(send_trade_alert(trade))
                 total_sells += 1
+
+                # ── Update profit-taking tier tracking on the holding ────
+                # This prevents the same tier from firing again next cycle,
+                # and sets the break-even stop lock after tier 1.
+                tier = signal.get("tier")
+                if tier:
+                    try:
+                        from database import get_portfolio_collection
+                        coll = get_portfolio_collection()
+                        update_ops = {
+                            "$addToSet": {"holdings.$.profit_taken_tiers": tier}
+                        }
+                        # If tier 1 fired, lock stop at entry price
+                        lock_stop = signal.get("lock_stop_at")
+                        if lock_stop:
+                            update_ops["$set"] = {
+                                "holdings.$.locked_stop_price": lock_stop
+                            }
+                        await coll.update_one(
+                            {"holdings.ticker": ticker},
+                            update_ops,
+                        )
+                        logger.info(
+                            f"Updated {ticker} profit tier tracking: "
+                            f"added '{tier}'"
+                            f"{f', locked stop at Rs.{lock_stop:.2f}' if lock_stop else ''}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not update tier tracking for {ticker}: {e}")
 
         # ── Summary ──────────────────────────────────────────────────────────
         if total_sells > 0:

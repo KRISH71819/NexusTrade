@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 # ── Finnhub client (lazy init) ───────────────────────────────────────────────
 _finnhub_client: finnhub.Client | None = None
 
+# ── Market Regime Cache (one fetch per cycle, shared across all tickers) ──────
+_regime_cache: dict | None = None
+_regime_cache_time: float = 0.0
+_REGIME_CACHE_TTL = 3600  # 60 minutes — regime doesn't change intra-hour
+
+# ── Daily ATR Cache (per-ticker, refreshed hourly) ───────────────────────────
+_daily_atr_cache: dict = {}
+_daily_atr_cache_time: float = 0.0
+_DAILY_ATR_CACHE_TTL = 3600  # 60 minutes
+
 
 def _get_finnhub_client() -> finnhub.Client:
     global _finnhub_client
@@ -225,6 +235,163 @@ def get_batch_prices(tickers: List[str]) -> dict:
                 prices[ticker] = price
 
     return prices
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   MARKET REGIME DETECTION (NIFTY 50 bull/bear filter)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_market_regime() -> dict:
+    """
+    Determine if the broad market is in a BULLISH or BEARISH regime.
+
+    Logic: If NIFTY 50 close > 50-day SMA → BULLISH, else BEARISH.
+    Cached for 60 minutes (regime doesn't flip intra-hour).
+
+    Returns:
+        {
+            "regime": "BULLISH" | "BEARISH",
+            "nifty_close": float,
+            "nifty_sma50": float,
+            "gap_pct": float,  # how far above/below SMA (positive = bullish)
+        }
+    """
+    import time as _t
+    global _regime_cache, _regime_cache_time
+
+    # Return cached if fresh
+    if _regime_cache and (_t.monotonic() - _regime_cache_time) < _REGIME_CACHE_TTL:
+        return _regime_cache
+
+    try:
+        index_ticker = settings.market_regime_index  # ^NSEI
+        sma_period = settings.market_regime_sma_period  # 50
+
+        df = yf.download(
+            index_ticker,
+            period="90d",
+            interval="1d",
+            progress=False,
+        )
+
+        if df.empty or len(df) < sma_period:
+            logger.warning(
+                f"Insufficient NIFTY data ({len(df)} bars, need {sma_period}). "
+                f"Defaulting to BULLISH regime."
+            )
+            result = {
+                "regime": "BULLISH",
+                "nifty_close": 0.0,
+                "nifty_sma50": 0.0,
+                "gap_pct": 0.0,
+            }
+            _regime_cache = result
+            _regime_cache_time = _t.monotonic()
+            return result
+
+        # Handle MultiIndex columns from yfinance
+        close_col = df["Close"]
+        if hasattr(close_col, "columns"):
+            close_col = close_col.iloc[:, 0]
+
+        nifty_close = float(close_col.iloc[-1])
+        sma50 = float(close_col.rolling(window=sma_period).mean().iloc[-1])
+
+        if pd.isna(sma50) or sma50 <= 0:
+            regime = "BULLISH"
+            gap_pct = 0.0
+        else:
+            regime = "BULLISH" if nifty_close > sma50 else "BEARISH"
+            gap_pct = round((nifty_close - sma50) / sma50 * 100, 2)
+
+        result = {
+            "regime": regime,
+            "nifty_close": round(nifty_close, 2),
+            "nifty_sma50": round(sma50, 2),
+            "gap_pct": gap_pct,
+        }
+
+        _regime_cache = result
+        _regime_cache_time = _t.monotonic()
+
+        logger.info(
+            f"MARKET REGIME: {regime} | NIFTY={nifty_close:,.2f} vs "
+            f"SMA50={sma50:,.2f} (gap {gap_pct:+.2f}%)"
+        )
+        return result
+
+    except Exception as e:
+        logger.warning(f"Market regime fetch failed: {e}. Defaulting to BULLISH.")
+        result = {
+            "regime": "BULLISH",
+            "nifty_close": 0.0,
+            "nifty_sma50": 0.0,
+            "gap_pct": 0.0,
+        }
+        _regime_cache = result
+        import time as _t2
+        _regime_cache_time = _t2.monotonic()
+        return result
+
+
+def fetch_daily_atr(ticker: str, period: int = 14) -> Optional[float]:
+    """
+    Fetch daily ATR for position sizing (more meaningful than hourly ATR).
+
+    Professional funds size positions using daily ATR because it captures
+    the true daily volatility range, not intraday noise.
+
+    Returns the 14-day daily ATR value, or None if unavailable.
+    """
+    import time as _t
+    global _daily_atr_cache, _daily_atr_cache_time
+
+    # Reset cache if stale
+    if (_t.monotonic() - _daily_atr_cache_time) > _DAILY_ATR_CACHE_TTL:
+        _daily_atr_cache = {}
+        _daily_atr_cache_time = _t.monotonic()
+
+    # Return cached if available
+    if ticker in _daily_atr_cache:
+        return _daily_atr_cache[ticker]
+
+    try:
+        df = yf.download(
+            ticker,
+            period="60d",
+            interval="1d",
+            progress=False,
+        )
+
+        if df.empty or len(df) < period + 1:
+            return None
+
+        # Handle MultiIndex columns
+        high = df["High"]
+        low = df["Low"]
+        close = df["Close"]
+
+        if hasattr(high, "columns"):
+            high = high.iloc[:, 0]
+        if hasattr(low, "columns"):
+            low = low.iloc[:, 0]
+        if hasattr(close, "columns"):
+            close = close.iloc[:, 0]
+
+        atr_obj = AverageTrueRange(high, low, close, window=period)
+        atr_series = atr_obj.average_true_range()
+        atr_val = float(atr_series.iloc[-1])
+
+        if pd.isna(atr_val) or atr_val <= 0:
+            return None
+
+        _daily_atr_cache[ticker] = round(atr_val, 2)
+        logger.debug(f"Daily ATR for {ticker}: Rs.{atr_val:.2f}")
+        return round(atr_val, 2)
+
+    except Exception as e:
+        logger.debug(f"Could not fetch daily ATR for {ticker}: {e}")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
