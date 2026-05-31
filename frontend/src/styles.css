@@ -684,6 +684,131 @@ tbody tr:hover { background: var(--panel-2); }
   .workspace { padding: 10px; }
   .watchlist, .metrics-grid, .scanner-grid, .score-grid, .pipeline { grid-template-columns: 1fr; }
   .chart-canvas-wrap { min-height: 300px; }
-  .feature-row { grid-template-columns: 1fr; padding: 6px 0; }
   .chart-actions { width: 100%; margin-left: 0; }
 }
+
+/* ── Sidebar Navigation & Multi-Page Layout ──────────────────────────────── */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 20px;
+}
+
+.nav-section-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 800;
+  font-size: 11px;
+  padding: 8px 4px 4px;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-subtle);
+  background: var(--panel);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 180ms ease;
+}
+
+.nav-link:hover {
+  border-color: rgba(41, 121, 255, 0.5);
+  background: var(--panel-2);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.nav-link.active {
+  border-color: var(--blue);
+  background: var(--panel-2);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--blue), inset 0 0 20px var(--blue-soft);
+}
+
+.sidebar-footer {
+  margin-top: 30px;
+  padding: 10px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ── Responsive Sidebar Overlay & Menu ───────────────────────────────────── */
+.mobile-menu-btn {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  box-shadow: 0 4px 16px rgba(41, 121, 255, 0.4);
+  z-index: 1000;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s;
+}
+.mobile-menu-btn:active {
+  transform: scale(0.95);
+}
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 998;
+}
+
+@media (max-width: 860px) {
+  .app-shell {
+    display: block;
+  }
+  .mobile-menu-btn {
+    display: flex;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: -280px;
+    width: 280px;
+    height: 100vh;
+    z-index: 999;
+    transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.open {
+    left: 0;
+  }
+  .sidebar-overlay.open {
+    display: block;
+  }
+}
+
+/* ── Dashboard Grid Layout ────────────────────────────────────────────────── */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 1024px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
