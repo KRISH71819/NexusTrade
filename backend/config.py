@@ -50,15 +50,15 @@ class Settings(BaseSettings):
     max_sector_stocks: int = 3           # max holdings per sector
 
     # ── Underperformer Detection ─────────────────────────────────────────
-    underperformer_days: int = 5               # check performance over N days
-    underperformer_min_loss_pct: float = 0.03  # flag if losing > 3% over N days
+    underperformer_days: int = 12              # check performance over N days
+    underperformer_min_loss_pct: float = 0.05  # flag if losing > 5% over N days
     underperformer_stagnant_pct: float = 0.01  # flag if moved < 1% in N days
     profit_take_partial_pct: float = 0.25      # sell 25% of position when taking profit
     profit_take_threshold_pct: float = 0.20    # take partial profit at 20%+ gain
 
     # ── Portfolio Rotation ────────────────────────────────────────────────
     rotation_min_score_gap: float = 0.25       # min score advantage for a swap
-    rotation_min_hold_hours: float = 24.0      # must hold at least 24h before rotation
+    rotation_min_hold_hours: float = 120.0     # must hold at least 5 days before rotation
 
     # ── Market Regime Filter ────────────────────────────────────────────
     market_regime_index: str = "^NSEI"            # NIFTY 50 index symbol
