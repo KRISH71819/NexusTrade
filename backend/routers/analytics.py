@@ -16,16 +16,55 @@ from database import (
     get_portfolio_history_collection,
     get_trades_collection,
 )
+from data_ingestion import get_batch_prices
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
+# IST offset for market-open anchoring
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #   PnL ANALYTICS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _market_open_today_utc(now_utc: datetime) -> datetime:
+    """
+    Get today's Indian market open time (9:15 IST) in UTC.
+    If current time is before 9:15 IST, returns yesterday's 9:15 IST.
+    """
+    now_ist = now_utc + _IST_OFFSET
+    market_open_ist = now_ist.replace(
+        hour=settings.market_open_hour,
+        minute=settings.market_open_minute,
+        second=0, microsecond=0,
+    )
+    if now_ist < market_open_ist:
+        # Before today's market open — use previous day's open
+        market_open_ist -= timedelta(days=1)
+    return market_open_ist - _IST_OFFSET  # convert back to UTC
+
+
+def _week_start_utc(now_utc: datetime) -> datetime:
+    """
+    Get this week's Monday 9:15 IST in UTC.
+    If current day is before Monday market open, go to previous week's Monday.
+    """
+    now_ist = now_utc + _IST_OFFSET
+    # Monday = 0 in weekday()
+    days_since_monday = now_ist.weekday()
+    monday_ist = (now_ist - timedelta(days=days_since_monday)).replace(
+        hour=settings.market_open_hour,
+        minute=settings.market_open_minute,
+        second=0, microsecond=0,
+    )
+    if now_ist < monday_ist:
+        monday_ist -= timedelta(weeks=1)
+    return monday_ist - _IST_OFFSET  # convert back to UTC
+
 
 async def _get_snapshot_value_at(timestamp: datetime) -> Optional[float]:
     """Get the portfolio total_value closest to (but before) the given timestamp."""
@@ -40,56 +79,17 @@ async def _get_snapshot_value_at(timestamp: datetime) -> Optional[float]:
     return None
 
 
-async def _compute_realized_pnl() -> float:
-    """
-    Compute total realized P&L from all SELL trades.
-    For each SELL, realized PnL = (sell_price - avg_buy_price) * quantity.
-    We look up the avg_buy_price from the most recent BUY for the same ticker
-    that occurred before the sell.
-    """
+async def _compute_total_charges() -> float:
+    """Sum all charges paid across all trades."""
     trades_col = get_trades_collection()
-
-    # Get all sells
     cursor = trades_col.find(
-        {"action": "SELL"},
-        {"_id": 0, "ticker": 1, "price": 1, "quantity": 1, "timestamp": 1},
-    ).sort("timestamp", -1)
-    sells = await cursor.to_list(length=10000)
-
-    total_realized = 0.0
-
-    for sell in sells:
-        ticker = sell["ticker"]
-        sell_price = sell["price"]
-        sell_qty = sell["quantity"]
-        sell_time = sell["timestamp"]
-
-        # Find the most recent BUY for this ticker before this sell
-        buy_cursor = trades_col.find(
-            {
-                "action": "BUY",
-                "ticker": ticker,
-                "timestamp": {"$lte": sell_time},
-            },
-            {"_id": 0, "price": 1, "quantity": 1},
-        ).sort("timestamp", -1).limit(1)
-        buys = await buy_cursor.to_list(length=1)
-
-        if buys:
-            avg_buy_price = buys[0]["price"]
-        else:
-            # Fallback: try to find any BUY for this ticker
-            any_buy_cursor = trades_col.find(
-                {"action": "BUY", "ticker": ticker},
-                {"_id": 0, "price": 1},
-            ).sort("timestamp", -1).limit(1)
-            any_buys = await any_buy_cursor.to_list(length=1)
-            avg_buy_price = any_buys[0]["price"] if any_buys else sell_price
-
-        realized = (sell_price - avg_buy_price) * sell_qty
-        total_realized += realized
-
-    return round(total_realized, 2)
+        {"charges.total_charges": {"$exists": True}},
+        {"_id": 0, "charges.total_charges": 1},
+    )
+    total = 0.0
+    async for doc in cursor:
+        total += doc.get("charges", {}).get("total_charges", 0)
+    return round(total, 2)
 
 
 @router.get("/pnl")
@@ -97,8 +97,11 @@ async def get_pnl_analytics():
     """
     Compute P&L analytics across multiple timeframes.
 
-    Returns daily, weekly, yearly P&L (from portfolio_history),
-    plus total realized and unrealized P&L.
+    Key principles:
+      1. Uses LIVE market prices for current_value (not stale DB value)
+      2. Computes realized_pnl = total_pnl - unrealized_pnl (guarantees they sum correctly)
+      3. Daily P&L = change since market open today (9:15 IST)
+      4. Weekly P&L = change since Monday 9:15 IST
     """
     try:
         now = datetime.now(timezone.utc)
@@ -110,60 +113,109 @@ async def get_pnl_analytics():
         if not portfolio:
             return _empty_pnl_response()
 
-        current_value = portfolio.get("total_value", settings.initial_balance)
         initial_balance = portfolio.get("initial_balance", settings.initial_balance)
         cash = portfolio.get("cash", 0)
         holdings = portfolio.get("holdings", [])
 
-        # Compute unrealized PnL from current holdings
+        # ── LIVE VALUATION: fetch live prices for all holdings ────────────
+        held_tickers = [h["ticker"] for h in holdings if h.get("quantity", 0) > 0]
+        live_prices = get_batch_prices(held_tickers) if held_tickers else {}
+
+        # Compute holdings value and unrealized P&L using LIVE prices
+        holdings_value = 0.0
         total_unrealized = 0.0
+        invested_capital = 0.0
         for h in holdings:
             qty = h.get("quantity", 0)
             avg_price = h.get("avg_price", 0)
-            current_price = h.get("current_price", avg_price)
+            current_price = live_prices.get(h["ticker"]) or h.get("current_price", avg_price)
+
+            market_value = current_price * qty
+            holdings_value += market_value
+
             if qty > 0 and avg_price > 0:
                 total_unrealized += (current_price - avg_price) * qty
+                invested_capital += avg_price * qty
+
         total_unrealized = round(total_unrealized, 2)
+        invested_capital = round(invested_capital, 2)
 
-        # Compute realized PnL
-        total_realized = await _compute_realized_pnl()
+        # Current value using LIVE prices (same formula as /api/portfolio)
+        current_value = round(cash + holdings_value, 2)
 
-        # ── Timeframe PnL (from portfolio_history snapshots) ─────────────
-        day_ago_value = await _get_snapshot_value_at(now - timedelta(days=1))
-        week_ago_value = await _get_snapshot_value_at(now - timedelta(days=7))
+        # Total P&L from initial balance
+        total_pnl = round(current_value - initial_balance, 2)
+        total_pnl_pct = round(
+            ((current_value - initial_balance) / initial_balance) * 100, 2
+        ) if initial_balance > 0 else 0.0
+
+        # ── REALIZED P&L: computed residually so it ALWAYS adds up ───────
+        # total_pnl = realized + unrealized, therefore:
+        total_realized = round(total_pnl - total_unrealized, 2)
+
+        # ── DAILY P&L: change since market open today (9:15 IST) ─────────
+        day_anchor = _market_open_today_utc(now)
+        day_base_value = await _get_snapshot_value_at(day_anchor)
+
+        if day_base_value is not None:
+            daily_pnl = round(current_value - day_base_value, 2)
+            daily_pnl_pct = round(
+                (daily_pnl / day_base_value) * 100, 2
+            ) if day_base_value > 0 else 0.0
+        else:
+            # No snapshot exists before market open — likely first day
+            daily_pnl = 0.0
+            daily_pnl_pct = 0.0
+
+        # ── WEEKLY P&L: change since Monday 9:15 IST ────────────────────
+        week_anchor = _week_start_utc(now)
+        week_base_value = await _get_snapshot_value_at(week_anchor)
+
+        if week_base_value is not None:
+            weekly_pnl = round(current_value - week_base_value, 2)
+            weekly_pnl_pct = round(
+                (weekly_pnl / week_base_value) * 100, 2
+            ) if week_base_value > 0 else 0.0
+        else:
+            weekly_pnl = 0.0
+            weekly_pnl_pct = 0.0
+
+        # ── YEARLY P&L ──────────────────────────────────────────────────
         year_ago_value = await _get_snapshot_value_at(now - timedelta(days=365))
+        if year_ago_value is not None:
+            yearly_pnl = round(current_value - year_ago_value, 2)
+            yearly_pnl_pct = round(
+                (yearly_pnl / year_ago_value) * 100, 2
+            ) if year_ago_value > 0 else 0.0
+        else:
+            yearly_pnl = total_pnl
+            yearly_pnl_pct = total_pnl_pct
 
-        # Fallback to initial balance if no snapshot exists
-        day_base = day_ago_value or initial_balance
-        week_base = week_ago_value or initial_balance
-        year_base = year_ago_value or initial_balance
-
-        daily_pnl = round(current_value - day_base, 2)
-        weekly_pnl = round(current_value - week_base, 2)
-        yearly_pnl = round(current_value - year_base, 2)
+        # ── TOTAL CHARGES PAID ──────────────────────────────────────────
+        total_charges = await _compute_total_charges()
 
         return {
             "daily_pnl": {
                 "value": daily_pnl,
-                "pct": round((daily_pnl / day_base) * 100, 2) if day_base > 0 else 0.0,
+                "pct": daily_pnl_pct,
             },
             "weekly_pnl": {
                 "value": weekly_pnl,
-                "pct": round((weekly_pnl / week_base) * 100, 2) if week_base > 0 else 0.0,
+                "pct": weekly_pnl_pct,
             },
             "yearly_pnl": {
                 "value": yearly_pnl,
-                "pct": round((yearly_pnl / year_base) * 100, 2) if year_base > 0 else 0.0,
+                "pct": yearly_pnl_pct,
             },
             "total_realized_pnl": total_realized,
             "total_unrealized_pnl": total_unrealized,
-            "total_portfolio_value": round(current_value, 2),
+            "total_portfolio_value": current_value,
             "cash": round(cash, 2),
             "initial_balance": round(initial_balance, 2),
-            "total_pnl": round(current_value - initial_balance, 2),
-            "total_pnl_pct": round(
-                ((current_value - initial_balance) / initial_balance) * 100, 2
-            ) if initial_balance > 0 else 0.0,
+            "total_pnl": total_pnl,
+            "total_pnl_pct": total_pnl_pct,
+            "invested_capital": invested_capital,
+            "total_charges_paid": total_charges,
         }
 
     except Exception as e:
@@ -183,6 +235,8 @@ def _empty_pnl_response():
         "initial_balance": settings.initial_balance,
         "total_pnl": 0.0,
         "total_pnl_pct": 0.0,
+        "invested_capital": 0.0,
+        "total_charges_paid": 0.0,
     }
 
 
@@ -242,6 +296,7 @@ async def get_trade_history(
                 "realized_pnl": None,
                 "realized_pnl_pct": None,
                 "portfolio_snapshot": trade.get("portfolio_snapshot"),
+                "charges": trade.get("charges"),
             }
 
             if trade.get("action") == "SELL":

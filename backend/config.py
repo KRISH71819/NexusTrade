@@ -79,7 +79,18 @@ class Settings(BaseSettings):
     max_sector_value_pct: float = 0.25            # 25% of portfolio value per sector
 
     # ── Slippage & Friction Simulation ───────────────────────────────────
-    slippage_bps: float = 15.0                    # 15 basis points (0.15%) per trade
+    slippage_bps: float = 15.0                    # 15 basis points (0.15%) market impact per trade
+
+    # ── Indian Market Trading Charges (realistic simulation) ─────────────
+    # These are deducted from cash on every trade to simulate real costs.
+    # Reference: NSE delivery-based equity trading charges (2024-25)
+    stt_buy_pct: float = 0.001                    # STT 0.1% on BUY side (delivery)
+    stt_sell_pct: float = 0.001                   # STT 0.1% on SELL side (delivery)
+    exchange_txn_charge_pct: float = 0.0000345    # NSE transaction charge 0.00345%
+    sebi_turnover_fee_pct: float = 0.000001       # SEBI fee 0.0001%
+    stamp_duty_buy_pct: float = 0.00015           # Stamp duty 0.015% on BUY side only
+    brokerage_per_order: float = 20.0             # Flat brokerage per order (discount broker)
+    gst_pct: float = 0.18                         # 18% GST on (brokerage + exchange charges)
 
     # ── Volume Confirmation Gate ─────────────────────────────────────────
     min_volume_ratio: float = 1.2                 # require volume ≥ 1.2× 20-day avg

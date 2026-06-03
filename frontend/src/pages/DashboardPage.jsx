@@ -155,7 +155,7 @@ export default function DashboardPage() {
           <MetricCard
             icon={<CircleDollarSign size={18} />}
             label="Portfolio Value"
-            value={money(portfolio.total_value)}
+            value={money(pnlData.total_portfolio_value || portfolio.total_value)}
             sub={`${money(pnlData.total_pnl)} (${percent(pnlData.total_pnl_pct)})`}
             trend={pnlData.total_pnl}
             glow
@@ -188,9 +188,13 @@ export default function DashboardPage() {
             icon={<Wallet size={18} />}
             label="Cash Available"
             value={money(portfolio.cash)}
-            sub={`${holdings.length} holdings • ${percent(
-              portfolio.total_value ? (portfolio.cash / portfolio.total_value) * 100 : 0
-            )} liquid`}
+            sub={`Invested: ${money(pnlData.invested_capital)}`}
+          />
+          <MetricCard
+            icon={<CircleDollarSign size={18} />}
+            label="Invested Capital"
+            value={money(pnlData.invested_capital)}
+            sub={`Charges: ${money(pnlData.total_charges_paid)}`}
           />
           <MetricCard
             icon={riskStatus.buying_halted ? <ShieldAlert size={18} /> : <Shield size={18} />}

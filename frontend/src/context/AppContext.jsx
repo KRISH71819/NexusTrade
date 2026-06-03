@@ -22,6 +22,8 @@ const emptyPnl = {
   cash: 0,
   total_pnl: 0,
   total_pnl_pct: 0,
+  invested_capital: 0,
+  total_charges_paid: 0,
 };
 
 const initialState = {

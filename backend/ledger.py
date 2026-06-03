@@ -24,6 +24,41 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# Track last snapshot time to throttle frequency (max 1 per 15 min)
+_last_snapshot_time: datetime | None = None
+_SNAPSHOT_INTERVAL_SECONDS = 900  # 15 minutes
+
+
+def calculate_trade_charges(turnover: float, side: str) -> dict:
+    """
+    Calculate Indian market trading charges for a delivery-based equity trade.
+
+    Args:
+        turnover: Total trade value (price × quantity)
+        side: 'BUY' or 'SELL'
+
+    Returns:
+        dict with itemized charges and total
+    """
+    stt = turnover * (settings.stt_buy_pct if side == "BUY" else settings.stt_sell_pct)
+    exchange_txn = turnover * settings.exchange_txn_charge_pct
+    sebi_fee = turnover * settings.sebi_turnover_fee_pct
+    stamp_duty = turnover * settings.stamp_duty_buy_pct if side == "BUY" else 0.0
+    brokerage = settings.brokerage_per_order
+    gst = (brokerage + exchange_txn) * settings.gst_pct
+
+    total = stt + exchange_txn + sebi_fee + stamp_duty + brokerage + gst
+
+    return {
+        "stt": round(stt, 2),
+        "exchange_txn": round(exchange_txn, 2),
+        "sebi_fee": round(sebi_fee, 2),
+        "stamp_duty": round(stamp_duty, 2),
+        "brokerage": round(brokerage, 2),
+        "gst": round(gst, 2),
+        "total_charges": round(total, 2),
+    }
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #   READ OPERATIONS
@@ -175,6 +210,19 @@ async def update_portfolio_valuation(live_prices: dict) -> dict:
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        # Record periodic snapshot (throttled to max 1 per 15 minutes)
+        global _last_snapshot_time
+        now = datetime.now(timezone.utc)
+        should_snapshot = (
+            _last_snapshot_time is None
+            or (now - _last_snapshot_time).total_seconds() >= _SNAPSHOT_INTERVAL_SECONDS
+        )
+        if should_snapshot:
+            await _record_snapshot(cash, holdings_value, total_value)
+            _last_snapshot_time = now
+            logger.debug(f"Portfolio snapshot recorded: Rs {total_value:,.2f}")
+
     except PyMongoError as e:
         logger.warning(f"Could not update portfolio valuation: {e}")
 
@@ -273,7 +321,26 @@ async def execute_buy(
         return {"error": "Computed quantity is 0", "ticker": ticker}
 
     total_cost = quantity * price
-    new_cash = cash - total_cost
+
+    # Calculate and deduct trading charges
+    charges = calculate_trade_charges(total_cost, "BUY")
+    total_cost_with_charges = total_cost + charges["total_charges"]
+    new_cash = cash - total_cost_with_charges
+
+    if new_cash < 0:
+        # Not enough cash to cover cost + charges
+        logger.warning(
+            f"Insufficient funds after charges for {ticker}: "
+            f"cost Rs.{total_cost:.2f} + charges Rs.{charges['total_charges']:.2f} "
+            f"> cash Rs.{cash:.2f}"
+        )
+        return {"error": "Insufficient funds (after charges)", "ticker": ticker}
+
+    logger.info(
+        f"[CHARGES] {ticker} BUY: STT Rs.{charges['stt']:.2f}, "
+        f"Brokerage Rs.{charges['brokerage']:.2f}, GST Rs.{charges['gst']:.2f}, "
+        f"Total charges Rs.{charges['total_charges']:.2f}"
+    )
 
     # Update holdings
     holdings = portfolio.get("holdings", [])
@@ -347,6 +414,7 @@ async def execute_buy(
             analysis=analysis,
             cash_after=new_cash,
             portfolio_total=total_value,
+            charges=charges,
         )
         await get_trades_collection().insert_one(trade_doc)
         await _log_analysis_decision(ticker, TradeAction.BUY, analysis)
@@ -358,6 +426,7 @@ async def execute_buy(
         trade_doc = _build_trade_doc(
             ticker=ticker, action=TradeAction.BUY, quantity=quantity, price=price,
             total_value=total_cost, analysis=analysis, cash_after=new_cash, portfolio_total=total_value,
+            charges=charges,
         )
 
     logger.info(
@@ -406,13 +475,27 @@ async def execute_sell(
     quantity = min(quantity, existing["quantity"])
     total_proceeds = quantity * price
 
+    # Calculate and deduct trading charges from sell proceeds
+    charges = calculate_trade_charges(total_proceeds, "SELL")
+    net_proceeds = total_proceeds - charges["total_charges"]
+
+    logger.info(
+        f"[CHARGES] {ticker} SELL: STT Rs.{charges['stt']:.2f}, "
+        f"Brokerage Rs.{charges['brokerage']:.2f}, GST Rs.{charges['gst']:.2f}, "
+        f"Total charges Rs.{charges['total_charges']:.2f}"
+    )
+
     # Update holding
     existing["quantity"] -= quantity
     if existing["quantity"] <= 0:
         holdings = [h for h in holdings if h["ticker"] != ticker]
 
-    new_cash = portfolio["cash"] + total_proceeds
-    holdings_value = sum(h["quantity"] * h.get("avg_price", 0) for h in holdings)
+    new_cash = portfolio["cash"] + net_proceeds
+    # Use current_price (live) for remaining holdings valuation, not avg_price
+    holdings_value = sum(
+        h["quantity"] * h.get("current_price", h.get("avg_price", 0))
+        for h in holdings
+    )
     total_value = new_cash + holdings_value
     initial = portfolio.get("initial_balance", settings.initial_balance)
 
@@ -448,6 +531,7 @@ async def execute_sell(
             analysis=analysis,
             cash_after=new_cash,
             portfolio_total=total_value,
+            charges=charges,
         )
         await get_trades_collection().insert_one(trade_doc)
         await _log_analysis_decision(ticker, TradeAction.SELL, analysis)
@@ -459,6 +543,7 @@ async def execute_sell(
         trade_doc = _build_trade_doc(
             ticker=ticker, action=TradeAction.SELL, quantity=quantity, price=price,
             total_value=total_proceeds, analysis=analysis, cash_after=new_cash, portfolio_total=total_value,
+            charges=charges,
         )
 
     logger.info(
@@ -543,9 +628,10 @@ def _build_trade_doc(
     analysis: AnalysisResult,
     cash_after: float,
     portfolio_total: float,
+    charges: dict | None = None,
 ) -> dict:
     """Build a fully transparent trade document."""
-    return {
+    doc = {
         "timestamp": datetime.now(timezone.utc),
         "ticker": ticker,
         "action": action.value,
@@ -569,6 +655,10 @@ def _build_trade_doc(
             "total_value": round(portfolio_total, 2),
         },
     }
+    # Include itemized trading charges if provided
+    if charges:
+        doc["charges"] = charges
+    return doc
 
 
 async def _record_snapshot(cash: float, holdings_value: float, total_value: float):
