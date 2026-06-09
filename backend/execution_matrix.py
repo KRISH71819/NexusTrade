@@ -10,7 +10,8 @@ Final Score = (
 
 Decision Rules:
     BUY:  final_score > 0.60 AND crisis_detected == False AND risk_approved
-          AND market_regime == BULLISH AND volume_ratio >= 1.2
+          AND market_regime in (BULLISH, CAUTIOUS) AND volume_ratio >= 0.8
+          In CAUTIOUS regime: score must exceed cautious_buy_score_threshold (0.70)
     SELL: final_score < 0.30 OR crisis_detected OR stop_loss_hit
     HOLD: everything else
 """
@@ -106,20 +107,37 @@ def decide_action(
     # ── Override 3: Drawdown halt (no new buys) ──────────────────────────
     drawdown_halt = risk_assessment.portfolio_drawdown_pct > settings.max_drawdown_pct
 
-    # ── Override 4: MARKET REGIME GATE (bearish → block all new BUYs) ────
-    # Professional funds NEVER initiate new long positions in a confirmed
-    # downtrend. Existing positions are managed by trailing stops.
+    # ── Override 4: MARKET REGIME GATE (graduated: BULLISH/CAUTIOUS/BEARISH) ─
+    # BULLISH: full buying allowed (NIFTY > SMA50)
+    # CAUTIOUS: buying allowed but higher score required (within 3% below SMA50)
+    # BEARISH: block all new buys (> 3% below SMA50)
     regime_blocked = False
-    if market_regime == "BEARISH" and not has_position:
-        regime_blocked = True
-        logger.info(
-            f"REGIME GATE: Market is BEARISH (NIFTY < SMA50) → blocking new BUY. "
-            f"Score={final_score:.2f} would have qualified otherwise."
-        )
+    cautious_blocked = False
+    if not has_position:
+        if market_regime == "BEARISH":
+            regime_blocked = True
+            logger.info(
+                f"REGIME GATE: Market is BEARISH (NIFTY far below SMA50) → blocking new BUY. "
+                f"Score={final_score:.2f} would have qualified otherwise."
+            )
+        elif market_regime == "CAUTIOUS":
+            # Allow buying but require a higher score threshold
+            if final_score < settings.cautious_buy_score_threshold:
+                cautious_blocked = True
+                logger.info(
+                    f"REGIME GATE: Market is CAUTIOUS → score {final_score:.2f} "
+                    f"below cautious threshold {settings.cautious_buy_score_threshold}. "
+                    f"Blocking BUY (needs stronger signal in uncertain market)."
+                )
+            else:
+                logger.info(
+                    f"REGIME GATE: Market is CAUTIOUS but score {final_score:.2f} "
+                    f">= {settings.cautious_buy_score_threshold} → allowing BUY."
+                )
 
     # ── Override 5: VOLUME CONFIRMATION GATE ─────────────────────────────
-    # Don't buy breakouts on weak volume — they're statistically more likely
-    # to be false signals. Require volume ≥ 1.2× 20-day average.
+    # Don't buy breakouts on dead volume — require volume ≥ 0.8× 20-day avg.
+    # (Relaxed from 1.2x because hourly data returns 0.00x on market open/weekends)
     volume_blocked = False
     if volume_ratio < settings.min_volume_ratio and not has_position:
         volume_blocked = True
@@ -132,6 +150,7 @@ def decide_action(
     if (final_score >= 0.60
             and not drawdown_halt
             and not regime_blocked
+            and not cautious_blocked
             and not volume_blocked
             and risk_assessment.risk_approved):
         # Additional check: Gemini must also agree (or at least not disagree)
@@ -203,6 +222,8 @@ def build_action_reason(
         blocked_reason = ""
         if market_regime == "BEARISH":
             blocked_reason = " BEARISH REGIME: new buys blocked."
+        elif market_regime == "CAUTIOUS":
+            blocked_reason = f" CAUTIOUS REGIME: higher score ({settings.cautious_buy_score_threshold}) needed for buys."
         if volume_ratio < settings.min_volume_ratio:
             blocked_reason += f" LOW VOLUME ({volume_ratio:.1f}x): buy blocked."
         reason = (

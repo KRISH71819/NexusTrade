@@ -254,7 +254,7 @@ def check_stop_losses(
 
         # ── STRICT TRAILING STOP (always-on, regime-adaptive) ────────────
         # In BEARISH regime: tighten from 8% to 4% (protect capital faster)
-        # In BULLISH regime: use normal 8% trailing stop
+        # In BULLISH/CAUTIOUS regime: use normal 8% trailing stop
         effective_trailing_pct = (
             settings.bearish_trailing_stop_pct
             if market_regime == "BEARISH"

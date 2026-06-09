@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     market_regime_index: str = "^NSEI"            # NIFTY 50 index symbol
     market_regime_sma_period: int = 50            # 50-day SMA for bull/bear regime
     bearish_trailing_stop_pct: float = 0.04       # tighter 4% trailing in bear markets
+    regime_cautious_threshold_pct: float = -3.0   # gap > -3% from SMA50 → CAUTIOUS (not full BEARISH)
+    cautious_buy_score_threshold: float = 0.70    # higher bar for buying in CAUTIOUS regime
 
     # ── ATR-Based Position Sizing ────────────────────────────────────────
     atr_risk_per_trade_pct: float = 0.01          # risk 1% of portfolio per trade
@@ -93,7 +95,7 @@ class Settings(BaseSettings):
     gst_pct: float = 0.18                         # 18% GST on (brokerage + exchange charges)
 
     # ── Volume Confirmation Gate ─────────────────────────────────────────
-    min_volume_ratio: float = 1.2                 # require volume ≥ 1.2× 20-day avg
+    min_volume_ratio: float = 0.8                  # require volume ≥ 0.8× 20-day avg (relaxed for hourly data)
 
     # ── Capital Allocation (diversification, not safety) ─────────────────
     max_open_positions: int = 15               # max concurrent holdings

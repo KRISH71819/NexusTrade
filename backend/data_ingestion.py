@@ -301,8 +301,15 @@ def fetch_market_regime() -> dict:
             regime = "BULLISH"
             gap_pct = 0.0
         else:
-            regime = "BULLISH" if nifty_close > sma50 else "BEARISH"
             gap_pct = round((nifty_close - sma50) / sma50 * 100, 2)
+            if nifty_close > sma50:
+                regime = "BULLISH"
+            elif gap_pct >= settings.regime_cautious_threshold_pct:
+                # Close to SMA50 (within 3%) — allow cautious buying
+                regime = "CAUTIOUS"
+            else:
+                # Far below SMA50 (> 3% gap) — true bearish, block buys
+                regime = "BEARISH"
 
         result = {
             "regime": regime,
