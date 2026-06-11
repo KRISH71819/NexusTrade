@@ -577,6 +577,19 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         if h.get("quantity", 0) > 0
     ])
 
+    # ── MAX BUYS PER CYCLE (prevents deploying all cash at once) ─────
+    # In BULLISH markets, buys are unlimited (bounded only by max positions and cash).
+    # In CAUTIOUS or BEARISH, strict limits apply.
+    if market_regime == "BULLISH":
+        max_buys = settings.max_open_positions  # Effectively unlimited
+    else:
+        max_buys = (
+            settings.max_buys_per_cycle_cautious
+            if market_regime == "CAUTIOUS"
+            else settings.max_buys_per_cycle
+        )
+    buys_this_cycle = 0
+
     # Build a score map of all current holdings from this cycle's results
     # Used for swap decisions when cash is insufficient
     holding_scores = {}
@@ -590,6 +603,16 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
             logger.info(
                 f"  BATCH BUY STOP: Max positions ({settings.max_open_positions}) reached. "
                 f"Skipping remaining {len(buy_candidates) - buy_candidates.index(r)} candidates."
+            )
+            break
+
+        # Check cycle buy limit — prevent deploying all capital at once
+        if buys_this_cycle >= max_buys:
+            logger.info(
+                f"  BATCH BUY STOP: Max buys per cycle ({max_buys}) reached "
+                f"(regime={market_regime}). "
+                f"Remaining {len(buy_candidates) - buy_candidates.index(r)} candidates "
+                f"will be reconsidered next cycle."
             )
             break
 
@@ -624,6 +647,7 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         if "error" not in trade:
             asyncio.create_task(send_trade_alert(trade))
             stats["buys"] += 1
+            buys_this_cycle += 1
             current_holdings_count += 1
             logger.info(
                 f"  BATCH BUY: {ticker} @ Rs.{price:.2f} "
@@ -728,6 +752,7 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
                     if "error" not in retry_trade:
                         asyncio.create_task(send_trade_alert(retry_trade))
                         stats["buys"] += 1
+                        buys_this_cycle += 1
                         current_holdings_count += 1
                         logger.info(
                             f"  SWAP BUY: {ticker} @ Rs.{price:.2f} "

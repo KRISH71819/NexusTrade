@@ -153,15 +153,31 @@ def decide_action(
             and not cautious_blocked
             and not volume_blocked
             and risk_assessment.risk_approved):
-        # Additional check: Gemini must also agree (or at least not disagree)
-        if gemini_action in ("BUY", "HOLD"):
-            return TradeAction.BUY
+        # CRITICAL: For NEW positions, Gemini MUST say BUY (not just HOLD).
+        # Gemini's HOLD means "I'm not confident enough to recommend this"
+        # and we should RESPECT that, not override it with the score.
+        # For EXISTING positions (averaging up), HOLD is acceptable.
+        if has_position:
+            # Already holding — Gemini BUY or HOLD is fine for averaging up
+            if gemini_action in ("BUY", "HOLD"):
+                return TradeAction.BUY
+            else:
+                logger.info(
+                    f"Score {final_score:.2f} suggests adding to {gemini_action} position "
+                    f"but Gemini says SELL -> HOLD"
+                )
+                return TradeAction.HOLD
         else:
-            # Score says BUY but Gemini says SELL — hold and wait
-            logger.info(
-                f"Score {final_score:.2f} suggests BUY but Gemini says {gemini_action} -> HOLD"
-            )
-            return TradeAction.HOLD
+            # NEW position — require Gemini explicitly says BUY
+            if gemini_action == "BUY":
+                return TradeAction.BUY
+            else:
+                logger.info(
+                    f"Score {final_score:.2f} qualifies for BUY but Gemini says "
+                    f"{gemini_action} (not BUY) -> HOLD. "
+                    f"Gemini must agree for new positions."
+                )
+                return TradeAction.HOLD
 
     elif final_score < 0.30:
         if has_position:

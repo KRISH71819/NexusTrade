@@ -42,15 +42,15 @@ class Settings(BaseSettings):
     run_analysis_on_startup: bool = True
 
     # ── Risk Management ──────────────────────────────────────────────────
-    stop_loss_pct: float = 0.07          # sell if position drops 7%
+    stop_loss_pct: float = 0.05          # sell if position drops 5% (tightened from 7%)
     trailing_stop_activation_pct: float = 0.15  # activate trailing after 15% gain
     trailing_stop_distance_pct: float = 0.10    # trailing stop at 10% from peak (after activation)
-    trailing_stop_strict_pct: float = 0.08       # ALWAYS-ON: sell if price drops 8% from peak
+    trailing_stop_strict_pct: float = 0.06       # ALWAYS-ON: sell if price drops 6% from peak (tightened from 8%)
     max_drawdown_pct: float = 0.15       # halt buying if portfolio down 15%
     max_sector_stocks: int = 3           # max holdings per sector
 
     # ── Underperformer Detection ─────────────────────────────────────────
-    underperformer_days: int = 12              # check performance over N days
+    underperformer_days: int = 7               # check performance over N days (tightened from 12)
     underperformer_min_loss_pct: float = 0.05  # flag if losing > 5% over N days
     underperformer_stagnant_pct: float = 0.01  # flag if moved < 1% in N days
     profit_take_partial_pct: float = 0.25      # sell 25% of position when taking profit
@@ -64,8 +64,9 @@ class Settings(BaseSettings):
     market_regime_index: str = "^NSEI"            # NIFTY 50 index symbol
     market_regime_sma_period: int = 50            # 50-day SMA for bull/bear regime
     bearish_trailing_stop_pct: float = 0.04       # tighter 4% trailing in bear markets
+    cautious_trailing_stop_pct: float = 0.05      # 5% trailing in CAUTIOUS regime (between BULL 6% and BEAR 4%)
     regime_cautious_threshold_pct: float = -3.0   # gap > -3% from SMA50 → CAUTIOUS (not full BEARISH)
-    cautious_buy_score_threshold: float = 0.70    # higher bar for buying in CAUTIOUS regime
+    cautious_buy_score_threshold: float = 0.75    # higher bar for buying in CAUTIOUS regime (raised from 0.70)
 
     # ── ATR-Based Position Sizing ────────────────────────────────────────
     atr_risk_per_trade_pct: float = 0.01          # risk 1% of portfolio per trade
@@ -107,9 +108,13 @@ class Settings(BaseSettings):
     score_weak_hold: float = 0.40              # score between weak and strong → partial sell
     # score < weak_hold → full sell (free capital for better stocks)
 
+    # ── Max Buys Per Cycle (prevents deploying all cash at once) ─────────
+    max_buys_per_cycle: int = 3                # max 3 new buys per analysis cycle
+    max_buys_per_cycle_cautious: int = 2       # only 2 new buys in CAUTIOUS regime
+
     # ── Analysis Weights (must sum to 1.0) ───────────────────────────────
-    weight_gemini: float = 0.40
-    weight_ml: float = 0.25
+    weight_gemini: float = 0.50                # Gemini is primary (has macro/news context)
+    weight_ml: float = 0.15                    # ML on hourly data is unreliable (reduced from 0.25)
     weight_news: float = 0.20
     weight_risk: float = 0.15
 

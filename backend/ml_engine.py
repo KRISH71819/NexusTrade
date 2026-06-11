@@ -24,6 +24,7 @@ except ImportError:
 
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from ta.trend import SMAIndicator, EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -260,21 +261,74 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
             except Exception as e:
                 logger.warning(f"LightGBM failed for {ticker}: {e}")
 
+        # ── HistGradientBoosting ─────────────────────────────────────────
+        try:
+            hgb_model = HistGradientBoostingClassifier(
+                max_iter=100,
+                max_depth=4,
+                learning_rate=0.08,
+                l2_regularization=1.0,
+                random_state=42
+            )
+            hgb_model.fit(X_train, y_train)
+            hgb_prob = float(hgb_model.predict_proba(X_latest)[0][1])
+        except Exception as e:
+            logger.warning(f"HistGradientBoosting failed for {ticker}: {e}")
+            hgb_prob = None
+
+        # ── RandomForest ─────────────────────────────────────────────────
+        try:
+            rf_model = RandomForestClassifier(
+                n_estimators=100,
+                max_depth=4,
+                max_features="sqrt",
+                random_state=42
+            )
+            rf_model.fit(X_train, y_train)
+            rf_prob = float(rf_model.predict_proba(X_latest)[0][1])
+        except Exception as e:
+            logger.warning(f"RandomForest failed for {ticker}: {e}")
+            rf_prob = None
+
         # ── Ensemble ─────────────────────────────────────────────────────
+        probs = [xgb_prob]
+        weights = [0.4]
+        
         if lgb_prob is not None:
-            # Average ensemble
-            ensemble_prob = (xgb_prob * 0.55 + lgb_prob * 0.45)
-        else:
-            ensemble_prob = xgb_prob
+            probs.append(lgb_prob)
+            weights.append(0.3)
+            
+        if hgb_prob is not None:
+            probs.append(hgb_prob)
+            weights.append(0.2)
+            
+        if rf_prob is not None:
+            probs.append(rf_prob)
+            weights.append(0.1)
+            
+        ensemble_prob = sum(p * w for p, w in zip(probs, weights)) / sum(weights)
 
         # ── Calibration adjustment ───────────────────────────────────────
-        # Pull extreme probabilities toward 0.5 if validation accuracy is low
+        # Hourly data with ~80 samples is inherently noisy. The ML model
+        # frequently outputs 0.90+ confidences for stocks that then decline.
+        # Graduated calibration shrinks extreme probabilities toward 0.5,
+        # with stronger shrinkage when validation accuracy is low.
         if val_accuracy < 0.55:
-            # Low validation accuracy → shrink toward 0.5
-            calibration_factor = 0.6
-            ensemble_prob = 0.5 + (ensemble_prob - 0.5) * calibration_factor
+            # Very low accuracy → strong shrink (barely better than random)
+            calibration_factor = 0.4
+        elif val_accuracy < 0.60:
+            calibration_factor = 0.5
+        elif val_accuracy < 0.65:
+            calibration_factor = 0.65
+        else:
+            # Even with decent accuracy, still apply light shrinkage
+            # because hourly data is fundamentally noisy
+            calibration_factor = 0.80
 
-        ensemble_prob = max(0.01, min(0.99, ensemble_prob))
+        ensemble_prob = 0.5 + (ensemble_prob - 0.5) * calibration_factor
+
+        # Hard cap: ML should NEVER output near-certainty on hourly data
+        ensemble_prob = max(0.20, min(0.80, ensemble_prob))
 
         # Extract latest feature values for transparency
         latest_features = {}
@@ -292,6 +346,8 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
                 "validation_accuracy": round(val_accuracy, 4),
                 "xgb_prob": round(xgb_prob, 4),
                 "lgb_prob": round(lgb_prob, 4) if lgb_prob is not None else None,
+                "hgb_prob": round(hgb_prob, 4) if hgb_prob is not None else None,
+                "rf_prob": round(rf_prob, 4) if rf_prob is not None else None,
                 "ensemble_prob": round(ensemble_prob, 4),
                 "features_count": len(feature_cols),
                 "has_lightgbm": HAS_LIGHTGBM and lgb_prob is not None,
