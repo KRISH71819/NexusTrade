@@ -301,21 +301,29 @@ def check_stop_losses(
     return sell_signals
 
 
-def compute_risk_adjustment(risk_assessment: RiskAssessment) -> float:
+def compute_risk_adjustment(risk_assessment: RiskAssessment, is_held: bool = False) -> float:
     """
     Convert risk assessment to a -1 to +1 adjustment factor.
     Positive = favorable risk, negative = elevated risk.
+
+    Args:
+        risk_assessment: The risk assessment to convert.
+        is_held: If True, skip the risk_approved penalty.
+                 Sector/position-limit flags are meant to block NEW buys,
+                 not penalize the hold-score of existing positions.
     """
     score = 0.0
 
     # Base: invert risk score to get risk-adjusted value
     score = 1.0 - (risk_assessment.position_risk_score * 2)
 
-    # If risk not approved, strong negative signal
-    if not risk_assessment.risk_approved:
+    # If risk not approved, strong negative signal — BUT only for new positions.
+    # For held stocks, sector/position-limit flags shouldn't drag down the score
+    # (they're buy-blocking gates, not hold-quality signals).
+    if not risk_assessment.risk_approved and not is_held:
         score = min(score, -0.5)
 
-    # Stop loss hit = strong sell signal
+    # Stop loss hit = strong sell signal (always applies, even for held stocks)
     for flag in risk_assessment.risk_flags:
         if "STOP-LOSS HIT" in flag or "TRAILING STOP HIT" in flag:
             score = -1.0

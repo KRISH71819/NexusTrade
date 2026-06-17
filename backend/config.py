@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     max_sector_stocks: int = 3           # max holdings per sector
 
     # ── Underperformer Detection ─────────────────────────────────────────
-    underperformer_days: int = 7               # check performance over N days (tightened from 12)
+    underperformer_days: int = 10              # check performance over N days (relaxed from 7 — midcaps need time)
     underperformer_min_loss_pct: float = 0.05  # flag if losing > 5% over N days
-    underperformer_stagnant_pct: float = 0.01  # flag if moved < 1% in N days
+    underperformer_stagnant_pct: float = 0.02  # flag if moved < 2% in N days (relaxed from 1% — consolidation is normal)
     profit_take_partial_pct: float = 0.25      # sell 25% of position when taking profit
     profit_take_threshold_pct: float = 0.20    # take partial profit at 20%+ gain
 
@@ -64,9 +64,9 @@ class Settings(BaseSettings):
     market_regime_index: str = "^NSEI"            # NIFTY 50 index symbol
     market_regime_sma_period: int = 50            # 50-day SMA for bull/bear regime
     bearish_trailing_stop_pct: float = 0.04       # tighter 4% trailing in bear markets
-    cautious_trailing_stop_pct: float = 0.05      # 5% trailing in CAUTIOUS regime (between BULL 6% and BEAR 4%)
+    cautious_trailing_stop_pct: float = 0.07      # 7% trailing in CAUTIOUS regime (wider to absorb midcap volatility)
     regime_cautious_threshold_pct: float = -3.0   # gap > -3% from SMA50 → CAUTIOUS (not full BEARISH)
-    cautious_buy_score_threshold: float = 0.75    # higher bar for buying in CAUTIOUS regime (raised from 0.70)
+    cautious_buy_score_threshold: float = 0.68    # higher bar for buying in CAUTIOUS regime (lowered from 0.75 — 14% pass rate vs 8%)
 
     # ── ATR-Based Position Sizing ────────────────────────────────────────
     atr_risk_per_trade_pct: float = 0.01          # risk 1% of portfolio per trade
@@ -104,8 +104,8 @@ class Settings(BaseSettings):
     min_cash_reserve_pct: float = 0.05         # tiny 5% emergency buffer
 
     # ── Batch Decision Thresholds ────────────────────────────────────────
-    score_strong_hold: float = 0.55            # score >= this → keep full position
-    score_weak_hold: float = 0.40              # score between weak and strong → partial sell
+    score_strong_hold: float = 0.48            # score >= this → keep full position (lowered: typical HOLD stocks score 0.47-0.55)
+    score_weak_hold: float = 0.35              # score between weak and strong → partial sell (only truly weak stocks)
     # score < weak_hold → full sell (free capital for better stocks)
 
     # ── Max Buys Per Cycle (prevents deploying all cash at once) ─────────

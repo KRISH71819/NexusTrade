@@ -353,6 +353,8 @@ async def _analyze_single_ticker(
     crisis_detected = crisis_from_gemini or crisis_from_news
 
     # ── 5. Risk Assessment ───────────────────────────────────────────────
+    is_holding = await has_position(ticker)
+
     risk_assessment = assess_risk(
         ticker=ticker,
         current_price=current_price,
@@ -362,7 +364,7 @@ async def _analyze_single_ticker(
         crisis_detected=crisis_detected,
     )
 
-    risk_adjustment = compute_risk_adjustment(risk_assessment)
+    risk_adjustment = compute_risk_adjustment(risk_assessment, is_held=is_holding)
 
     # ── 6. Compute Final Score ───────────────────────────────────────────
     final_score = compute_final_score(
@@ -373,7 +375,6 @@ async def _analyze_single_ticker(
     )
 
     # ── 7. Decide Action (with regime + volume gates) ──────────────────
-    is_holding = await has_position(ticker)
     volume_ratio = indicators.get("volume_ratio", 1.0)
 
     action = decide_action(
@@ -548,6 +549,19 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
             )
         else:
             logger.warning(f"  BATCH SELL FAILED: {ticker} — {trade.get('error')}")
+
+    # ── THROTTLE partial sells to prevent cascade liquidation ─────────
+    # Without this, if 5 stocks all score 0.47-0.54, ALL get 50% sold
+    # every cycle — compounding into total wipeout within 2 days.
+    # Limit to the 2 weakest per cycle; the rest wait for next cycle.
+    if len(partial_sells) > 2:
+        partial_sells.sort(key=lambda r: r["final_score"])  # weakest first
+        throttled_scores = ", ".join(f"{r['final_score']:.2f}" for r in partial_sells[:2])
+        logger.info(
+            f"  PARTIAL SELL THROTTLE: {len(partial_sells)} candidates, "
+            f"limiting to 2 weakest (scores: {throttled_scores})"
+        )
+        partial_sells = partial_sells[:2]
 
     for r in partial_sells:
         ticker = r["ticker"]
