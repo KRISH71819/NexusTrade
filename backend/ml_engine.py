@@ -132,6 +132,11 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     features["high_low_range"] = (high - low) / close
     features["close_to_high"] = (close - low) / (high - low).replace(0, np.nan)
 
+    # ── Sanitize: clamp inf/-inf → NaN before they reach ML models ────
+    # Technical indicator math (division by zero, pct_change on zero volume,
+    # etc.) can produce inf values that crash XGBoost/LightGBM.
+    features.replace([np.inf, -np.inf], np.nan, inplace=True)
+
     return features
 
 
@@ -220,6 +225,18 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
         X_val = combined.iloc[train_end:val_end][feature_cols]
         y_val = combined.iloc[train_end:val_end]["target_combined"]
         X_latest = combined.iloc[-1:][feature_cols]
+
+        # ── Safety net: replace any residual inf values ──────────────
+        # _engineer_features already clamps inf→NaN, but target ratios
+        # or edge cases in dropna() ordering could still let inf slip.
+        X_train = X_train.replace([np.inf, -np.inf], np.nan)
+        X_val = X_val.replace([np.inf, -np.inf], np.nan)
+        X_latest = X_latest.replace([np.inf, -np.inf], np.nan)
+
+        # Fill remaining NaNs with 0 for tree models (they handle 0 fine)
+        X_train = X_train.fillna(0)
+        X_val = X_val.fillna(0)
+        X_latest = X_latest.fillna(0)
 
         # ── XGBoost ──────────────────────────────────────────────────────
         xgb_model = xgb.XGBClassifier(

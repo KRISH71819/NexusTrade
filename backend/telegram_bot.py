@@ -53,26 +53,45 @@ async def send_trade_alert(trade: dict) -> bool:
         )
 
         url = TELEGRAM_API.format(token=settings.telegram_bot_token)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json={
-                "chat_id": settings.telegram_chat_id,
-                "text": message,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True,
-            })
+        payload = {
+            "chat_id": settings.telegram_chat_id,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
 
-        if response.status_code == 200:
-            logger.info(f"Telegram alert sent: {action} {trade['ticker']}")
-            return True
-        else:
-            logger.error(
-                f"Telegram API error {response.status_code}: {response.text[:200]}"
-            )
-            return False
+        # Retry once on timeout (Telegram API can be slow under load)
+        import asyncio
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(url, json=payload)
 
-    except httpx.TimeoutException:
-        logger.error("Telegram alert timed out (10s)")
+                if response.status_code == 200:
+                    logger.info(f"Telegram alert sent: {action} {trade['ticker']}")
+                    return True
+                elif response.status_code == 429:
+                    # Rate limited by Telegram — wait and retry
+                    retry_after = int(response.headers.get("Retry-After", "5"))
+                    logger.warning(f"Telegram rate limited, retrying in {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                else:
+                    logger.error(
+                        f"Telegram API error {response.status_code}: {response.text[:200]}"
+                    )
+                    return False
+
+            except httpx.TimeoutException:
+                if attempt == 0:
+                    logger.warning("Telegram alert timed out (30s), retrying in 2s...")
+                    await asyncio.sleep(2)
+                    continue
+                logger.error("Telegram alert timed out after retry (30s)")
+                return False
+
         return False
+
     except Exception as e:
         logger.error(f"Failed to send Telegram alert: {type(e).__name__}: {e}")
         return False

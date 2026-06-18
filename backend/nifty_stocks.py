@@ -1,11 +1,22 @@
 import csv
 import io
 import logging
+import random
 import urllib.request
+import http.cookiejar
 
 logger = logging.getLogger(__name__)
 
 NIFTY500_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
+
+# Rotate user-agents to avoid NSE bot detection (403 blocks)
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+]
 
 # ── Known delisted / renamed symbols to EXCLUDE ─────────────────────────────
 # These are confirmed delisted, merged, or renamed as of May 2026.
@@ -107,21 +118,38 @@ def load_nifty500_watchlist() -> list[str]:
         return _cached_nifty500
 
     try:
-        # Use full browser-like headers to avoid 403 blocks from NSE
+        # Build a session with cookie persistence — NSE requires valid cookies
+        # from a prior page load before serving the CSV (anti-bot measure).
+        cj = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+        ua = random.choice(_USER_AGENTS)
+        common_headers = [
+            ("User-Agent", ua),
+            ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+            ("Accept-Language", "en-US,en;q=0.5"),
+            ("Accept-Encoding", "gzip, deflate, br"),
+            ("Connection", "keep-alive"),
+        ]
+        opener.addheaders = common_headers
+
+        # Step 1: Hit the homepage to get session cookies
+        try:
+            opener.open("https://www.niftyindices.com/", timeout=10)
+        except Exception:
+            pass  # Even a 403 on homepage may still set cookies
+
+        # Step 2: Fetch the CSV with the session cookies established above
         request = urllib.request.Request(
             NIFTY500_CONSTITUENTS_URL,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": ua,
+                "Accept": "text/csv,text/html,application/xhtml+xml,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
-                "Referer": "https://www.niftyindices.com/",
+                "Referer": "https://www.niftyindices.com/reports/equity-stock",
             },
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with opener.open(request, timeout=15) as response:
             csv_text = response.read().decode("utf-8-sig")
 
         reader = csv.DictReader(io.StringIO(csv_text))

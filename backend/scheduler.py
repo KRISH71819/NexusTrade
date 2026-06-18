@@ -161,15 +161,18 @@ async def run_analysis_cycle(force: bool = False):
                 logger.warning("Analysis cycle cancelled by new request")
                 return {"status": "cancelled", "results": results}
             try:
-                # 120s timeout per ticker — prevents a single hung request
-                # from freezing the entire cycle for hours
+                # 180s timeout per ticker — prevents a single hung request
+                # from freezing the entire cycle for hours.
+                # Increased from 120s because the full pipeline (data fetch +
+                # ML ensemble + LLM with fallback retry) can legitimately
+                # take 2+ minutes for some tickers.
                 result = await asyncio.wait_for(
                     _analyze_single_ticker(ticker, portfolio, market_regime),
-                    timeout=120.0,
+                    timeout=180.0,
                 )
                 results.append(result)
             except asyncio.TimeoutError:
-                logger.error(f"TIMEOUT: {ticker} analysis exceeded 120s — skipping")
+                logger.error(f"TIMEOUT: {ticker} analysis exceeded 180s — skipping")
                 results.append({"ticker": ticker, "action": "ERROR", "error": "timeout"})
             except Exception as e:
                 logger.error(f"Error analyzing {ticker}: {e}", exc_info=True)

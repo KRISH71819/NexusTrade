@@ -506,26 +506,28 @@ def _fetch_news_finnhub(ticker: str, max_headlines: int) -> List[NewsItem]:
         return []
 
 
-import time as _time  # for bulk screener delays
+import time as _time    # for bulk screener delays
+import random as _random  # for jitter in rate limiting
 
 
 def _chunked_yf_download(
     tickers: List[str],
-    chunk_size: int = 50,
-    max_retries: int = 3,
+    chunk_size: int = 25,
+    max_retries: int = 4,
     **yf_kwargs,
 ) -> pd.DataFrame:
     """
     Download yfinance data in chunks with adaptive backoff.
 
     Better than fixed delays between every chunk because:
-    - Only sleeps 1s between normal chunks (minimal overhead)
+    - Sleeps 2-3s between normal chunks (avoids Yahoo rate limits)
     - If rate-limited, retries that specific chunk with exponential backoff
     - Failed tickers in one chunk don't block the rest
+    - Random jitter prevents synchronized burst patterns
 
     Args:
         tickers: Full list of tickers to download.
-        chunk_size: Number of tickers per batch (50 is safe for Yahoo).
+        chunk_size: Number of tickers per batch (25 is safe for Yahoo).
         max_retries: Max retries per chunk on rate limit errors.
         **yf_kwargs: Passed through to yf.download (period, interval, etc.)
     """
@@ -552,19 +554,20 @@ def _chunked_yf_download(
             except Exception as e:
                 err_str = str(e)
                 if "Too Many Requests" in err_str or "Rate" in err_str or "429" in err_str:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    wait = 3 ** (attempt + 1) + _random.uniform(0, 2)  # ~3s, 9s, 27s, 81s
                     logger.warning(
                         f"Rate limited on chunk {chunk_idx + 1} "
-                        f"(attempt {attempt + 1}/{max_retries}), waiting {wait}s..."
+                        f"(attempt {attempt + 1}/{max_retries}), waiting {wait:.1f}s..."
                     )
                     _time.sleep(wait)
                 else:
                     logger.warning(f"Chunk {chunk_idx + 1} download error: {err_str[:100]}")
                     break  # Non-rate-limit error, skip this chunk
 
-        # Brief pause between chunks to avoid triggering rate limits
+        # Pause between chunks with jitter to avoid triggering rate limits
         if chunk_idx < len(chunks) - 1:
-            _time.sleep(1.0)
+            delay = 2.5 + _random.uniform(-0.5, 0.5)
+            _time.sleep(delay)
 
     # Merge all chunk DataFrames
     if not all_frames:
@@ -590,7 +593,7 @@ def bulk_screener(tickers: List[str], max_results: int = 10) -> List[str]:
     try:
         df = _chunked_yf_download(
             tickers,
-            chunk_size=50,
+            chunk_size=25,
             period="60d",
             interval="1h",
         )
