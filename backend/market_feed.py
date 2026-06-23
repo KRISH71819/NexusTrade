@@ -347,7 +347,7 @@ def _run_dhan_feed():
         feed.on_close = on_close
         
         # This blocks until the connection is closed
-        feed.connect()
+        feed.run()
         
     except ImportError:
         logger.error("dhanhq package not installed — real-time feed unavailable")
