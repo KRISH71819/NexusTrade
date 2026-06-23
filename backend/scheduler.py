@@ -47,6 +47,11 @@ from ledger import (
     log_hold,
     has_position,
     update_portfolio_valuation,
+    execute_buy_for_mode,
+    execute_sell_for_mode,
+    get_portfolio_for_mode,
+    has_position_for_mode,
+    sync_live_portfolio,
 )
 from models import AnalysisResult, TradeAction
 from telegram_bot import send_trade_alert
@@ -108,7 +113,8 @@ async def run_analysis_cycle(force: bool = False):
         logger.info("=" * 60)
 
         # ── Step 1: Get portfolio state ──────────────────────────────────
-        portfolio = await get_portfolio()
+        active_mode = settings.trading_mode
+        portfolio = await get_portfolio_for_mode(active_mode)
         holdings = portfolio.get("holdings", [])
         held_tickers = [h["ticker"] for h in holdings if h.get("quantity", 0) > 0]
 
@@ -197,12 +203,16 @@ async def run_analysis_cycle(force: bool = False):
         # ── Step 4: Update portfolio valuation with live prices ──────────
         try:
             held_tickers_now = [
-                h["ticker"] for h in (await get_portfolio()).get("holdings", [])
+                h["ticker"] for h in (await get_portfolio_for_mode(active_mode)).get("holdings", [])
                 if h.get("quantity", 0) > 0
             ]
             if held_tickers_now:
                 live_prices = get_batch_prices(held_tickers_now)
-                await update_portfolio_valuation(live_prices)
+                if active_mode == "paper":
+                    await update_portfolio_valuation(live_prices)
+                else:
+                    await sync_live_portfolio()
+
                 logger.info(f"Portfolio revalued with live prices for {len(live_prices)} holdings")
         except Exception as e:
             logger.warning(f"Could not update portfolio valuation: {e}")
@@ -262,6 +272,7 @@ async def _analyze_single_ticker(
     7. Decide action (with regime + volume gates)
     8. Return analysis (batch optimizer handles execution)
     """
+    active_mode = settings.trading_mode
 
     # ── 1. Data Ingestion ────────────────────────────────────────────────
     ingestion = await ingest_ticker_data(ticker)
@@ -302,7 +313,7 @@ async def _analyze_single_ticker(
     # do NOT waste an LLM call or buy this stock blindly.
     ml_status = ml_result.get("model_info", {}).get("status", "")
     if ml_status in ("insufficient_data", "insufficient_clean_data", "insufficient_training_data"):
-        is_holding = await has_position(ticker)
+        is_holding = await has_position_for_mode(ticker, active_mode)
         if not is_holding:
             logger.warning(
                 f"SKIPPING {ticker} — ML has {ml_status} "
@@ -356,7 +367,7 @@ async def _analyze_single_ticker(
     crisis_detected = crisis_from_gemini or crisis_from_news
 
     # ── 5. Risk Assessment ───────────────────────────────────────────────
-    is_holding = await has_position(ticker)
+    is_holding = await has_position_for_mode(ticker, active_mode)
 
     risk_assessment = assess_risk(
         ticker=ticker,
@@ -471,7 +482,8 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
     - Partial sells free capital without dumping recovering stocks
     - No extra API calls — uses scores already computed this cycle
     """
-    portfolio = await get_portfolio()
+    active_mode = settings.trading_mode
+    portfolio = await get_portfolio_for_mode(active_mode)
     holdings = portfolio.get("holdings", [])
     held_tickers = {h["ticker"] for h in holdings if h.get("quantity", 0) > 0}
 
@@ -542,7 +554,7 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         analysis = r["analysis"]
         price = r["price"]
 
-        trade = await execute_sell(ticker, price, analysis)
+        trade = await execute_sell_for_mode(ticker, price, analysis, mode=active_mode)
         if "error" not in trade:
             asyncio.create_task(send_trade_alert(trade))
             stats["sells"] += 1
@@ -575,7 +587,7 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         holding = next((h for h in holdings if h["ticker"] == ticker), None)
         if holding and holding.get("quantity", 0) > 1:
             sell_qty = max(1, holding["quantity"] // 2)
-            trade = await execute_sell(ticker, price, analysis, quantity=sell_qty)
+            trade = await execute_sell_for_mode(ticker, price, analysis, mode=active_mode, quantity=sell_qty)
             if "error" not in trade:
                 asyncio.create_task(send_trade_alert(trade))
                 stats["partial_sells"] += 1
@@ -588,7 +600,7 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
 
     # ── PHASE 3: EXECUTE BUYS (strongest scores first, with SWAP logic) ───
     # Re-fetch portfolio after sells to get updated cash balance
-    portfolio = await get_portfolio()
+    portfolio = await get_portfolio_for_mode(active_mode)
     current_holdings_count = len([
         h for h in portfolio.get("holdings", [])
         if h.get("quantity", 0) > 0
@@ -653,10 +665,11 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         except Exception as e:
             logger.debug(f"Could not fetch daily ATR for {ticker}: {e}")
 
-        trade = await execute_buy(
+        trade = await execute_buy_for_mode(
             ticker=ticker,
             price=price,
             analysis=analysis,
+            mode=active_mode,
             max_position_pct=max_pos_pct,
             atr=daily_atr,
         )
@@ -674,7 +687,7 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
             # ── SWAP LOGIC: Sell weakest holding to fund this buy ─────
             # Find the current holding with the lowest score from this cycle
             swappable = []
-            current_portfolio = await get_portfolio()
+            current_portfolio = await get_portfolio_for_mode(active_mode)
             current_holdings = current_portfolio.get("holdings", [])
 
             for h in current_holdings:
@@ -746,10 +759,11 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
                     action_reason=swap_reason,
                 )
 
-                sell_trade = await execute_sell(
+                sell_trade = await execute_sell_for_mode(
                     weakest["ticker"],
                     weakest["result"]["price"],
                     swap_analysis,
+                    mode=active_mode,
                 )
 
                 if "error" not in sell_trade:
@@ -758,10 +772,11 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
                     current_holdings_count -= 1
 
                     # Now retry the buy with freed capital
-                    retry_trade = await execute_buy(
+                    retry_trade = await execute_buy_for_mode(
                         ticker=ticker,
                         price=price,
                         analysis=analysis,
+                        mode=active_mode,
                         max_position_pct=max_pos_pct,
                         atr=daily_atr,
                     )
@@ -795,10 +810,11 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
             logger.warning(f"  BATCH BUY FAILED: {ticker} — {trade.get('error')}")
 
         # Re-fetch portfolio to get updated cash for next buy
-        portfolio = await get_portfolio()
+        portfolio = await get_portfolio_for_mode(active_mode)
 
-    # Log final portfolio state
-    final_portfolio = await get_portfolio()
+    # ── LOG SUMMARY ─────────────────────────────────────────────────────
+    # Re-fetch portfolio to show final state
+    final_portfolio = await get_portfolio_for_mode(active_mode)
     logger.info(
         f"BATCH OPTIMIZER DONE | Cash: Rs.{final_portfolio['cash']:,.2f} | "
         f"Holdings: {len([h for h in final_portfolio.get('holdings', []) if h.get('quantity', 0) > 0])} | "
@@ -820,7 +836,8 @@ async def run_risk_check():
       3. Profit-taking (partial sell on big winners to lock gains)
     """
     try:
-        portfolio = await get_portfolio()
+        active_mode = settings.trading_mode
+        portfolio = await get_portfolio_for_mode(active_mode)
         holdings = portfolio.get("holdings", [])
 
         if not holdings:
@@ -830,8 +847,19 @@ async def run_risk_check():
         if not held_tickers:
             return
 
-        # Fetch live prices for all holdings (sync yf.download → run in thread)
-        live_prices = await asyncio.to_thread(get_batch_prices, held_tickers)
+        # Use real-time cached prices when available (sub-second), else yfinance (15m delay)
+        from market_feed import get_live_prices, is_feed_connected
+        if is_feed_connected():
+            live_prices = get_live_prices(held_tickers)
+            # Fill any missing tickers from yfinance
+            missing = [t for t in held_tickers if t not in live_prices]
+            if missing:
+                yf_prices = await asyncio.to_thread(get_batch_prices, missing)
+                live_prices.update(yf_prices)
+            logger.debug(f"Risk check using {len(live_prices) - len(missing)} real-time + {len(missing)} yfinance prices")
+        else:
+            # Fallback: Fetch live prices for all holdings (sync yf.download → run in thread)
+            live_prices = await asyncio.to_thread(get_batch_prices, held_tickers)
 
         # Update valuation with live prices
         await update_portfolio_valuation(live_prices)
@@ -863,7 +891,7 @@ async def run_risk_check():
                 action=TradeAction.SELL,
                 action_reason=signal["reason"],
             )
-            trade = await execute_sell(ticker, signal["price"], analysis)
+            trade = await execute_sell_for_mode(ticker, signal["price"], analysis, mode=active_mode)
             if "error" not in trade:
                 asyncio.create_task(send_trade_alert(trade))
                 total_sells += 1
@@ -871,7 +899,7 @@ async def run_risk_check():
         # ── 2. Underperformer Detection (sell weak stocks) ───────────────────
         # Re-fetch portfolio after potential stop-loss sells
         if stop_signals:
-            portfolio = await get_portfolio()
+            portfolio = await get_portfolio_for_mode(active_mode)
 
         # detect_underperformers calls yf.download per holding — run in thread
         underperformer_signals = await asyncio.to_thread(detect_underperformers, portfolio, live_prices)
@@ -897,10 +925,11 @@ async def run_risk_check():
             )
 
             if signal.get("sell_all", True):
-                trade = await execute_sell(ticker, signal["price"], analysis)
+                trade = await execute_sell_for_mode(ticker, signal["price"], analysis, mode=active_mode)
             else:
-                trade = await execute_sell(
+                trade = await execute_sell_for_mode(
                     ticker, signal["price"], analysis,
+                    mode=active_mode,
                     quantity=signal.get("sell_quantity"),
                 )
 
@@ -910,7 +939,7 @@ async def run_risk_check():
 
         # ── 3. Profit-Taking (partial sell on winners) ───────────────────────
         if underperformer_signals:
-            portfolio = await get_portfolio()
+            portfolio = await get_portfolio_for_mode(active_mode)
 
         profit_signals = check_profit_taking(portfolio, live_prices)
 
@@ -938,8 +967,9 @@ async def run_risk_check():
                 action_reason=signal["reason"],
             )
 
-            trade = await execute_sell(
+            trade = await execute_sell_for_mode(
                 ticker, signal["price"], analysis,
+                mode=active_mode,
                 quantity=signal.get("sell_quantity"),
             )
             if "error" not in trade:

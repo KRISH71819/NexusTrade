@@ -15,6 +15,9 @@ from database import (
     get_portfolio_collection,
     get_portfolio_history_collection,
     get_trades_collection,
+    get_portfolio_collection_for_mode,
+    get_portfolio_history_collection_for_mode,
+    get_trades_collection_for_mode,
 )
 from data_ingestion import get_batch_prices
 from config import settings
@@ -66,9 +69,9 @@ def _week_start_utc(now_utc: datetime) -> datetime:
     return monday_ist - _IST_OFFSET  # convert back to UTC
 
 
-async def _get_snapshot_value_at(timestamp: datetime) -> Optional[float]:
+async def _get_snapshot_value_at(timestamp: datetime, mode: str = "paper") -> Optional[float]:
     """Get the portfolio total_value closest to (but before) the given timestamp."""
-    collection = get_portfolio_history_collection()
+    collection = get_portfolio_history_collection_for_mode(mode)
     cursor = collection.find(
         {"timestamp": {"$lte": timestamp}},
         {"_id": 0, "total_value": 1, "timestamp": 1},
@@ -79,9 +82,9 @@ async def _get_snapshot_value_at(timestamp: datetime) -> Optional[float]:
     return None
 
 
-async def _compute_total_charges() -> float:
+async def _compute_total_charges(mode: str = "paper") -> float:
     """Sum all charges paid across all trades."""
-    trades_col = get_trades_collection()
+    trades_col = get_trades_collection_for_mode(mode)
     cursor = trades_col.find(
         {"charges.total_charges": {"$exists": True}},
         {"_id": 0, "charges.total_charges": 1},
@@ -93,7 +96,7 @@ async def _compute_total_charges() -> float:
 
 
 @router.get("/pnl")
-async def get_pnl_analytics():
+async def get_pnl_analytics(mode: str = Query(default=None)):
     """
     Compute P&L analytics across multiple timeframes.
 
@@ -104,10 +107,11 @@ async def get_pnl_analytics():
       4. Weekly P&L = change since Monday 9:15 IST
     """
     try:
+        active_mode = mode or settings.trading_mode
         now = datetime.now(timezone.utc)
 
         # Get current portfolio state
-        portfolio_col = get_portfolio_collection()
+        portfolio_col = get_portfolio_collection_for_mode(active_mode)
         portfolio = await portfolio_col.find_one({"_id": "main"})
 
         if not portfolio:
@@ -155,7 +159,7 @@ async def get_pnl_analytics():
 
         # ── DAILY P&L: change since market open today (9:15 IST) ─────────
         day_anchor = _market_open_today_utc(now)
-        day_base_value = await _get_snapshot_value_at(day_anchor)
+        day_base_value = await _get_snapshot_value_at(day_anchor, active_mode)
 
         if day_base_value is not None:
             daily_pnl = round(current_value - day_base_value, 2)
@@ -169,7 +173,7 @@ async def get_pnl_analytics():
 
         # ── WEEKLY P&L: change since Monday 9:15 IST ────────────────────
         week_anchor = _week_start_utc(now)
-        week_base_value = await _get_snapshot_value_at(week_anchor)
+        week_base_value = await _get_snapshot_value_at(week_anchor, active_mode)
 
         if week_base_value is not None:
             weekly_pnl = round(current_value - week_base_value, 2)
@@ -181,7 +185,7 @@ async def get_pnl_analytics():
             weekly_pnl_pct = 0.0
 
         # ── YEARLY P&L ──────────────────────────────────────────────────
-        year_ago_value = await _get_snapshot_value_at(now - timedelta(days=365))
+        year_ago_value = await _get_snapshot_value_at(now - timedelta(days=365), active_mode)
         if year_ago_value is not None:
             yearly_pnl = round(current_value - year_ago_value, 2)
             yearly_pnl_pct = round(
@@ -192,7 +196,7 @@ async def get_pnl_analytics():
             yearly_pnl_pct = total_pnl_pct
 
         # ── TOTAL CHARGES PAID ──────────────────────────────────────────
-        total_charges = await _compute_total_charges()
+        total_charges = await _compute_total_charges(active_mode)
 
         return {
             "daily_pnl": {
@@ -216,6 +220,7 @@ async def get_pnl_analytics():
             "total_pnl_pct": total_pnl_pct,
             "invested_capital": invested_capital,
             "total_charges_paid": total_charges,
+            "mode": active_mode,
         }
 
     except Exception as e:
@@ -249,6 +254,7 @@ async def get_trade_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     ticker: Optional[str] = None,
+    mode: str = Query(default=None),
 ):
     """
     Paginated trade history with realized P&L for each SELL trade.
@@ -260,7 +266,8 @@ async def get_trade_history(
     BUY trades show realized_pnl = null.
     """
     try:
-        trades_col = get_trades_collection()
+        active_mode = mode or settings.trading_mode if hasattr(settings, 'trading_mode') else "paper"
+        trades_col = get_trades_collection_for_mode(active_mode)
 
         # Build query
         query = {}

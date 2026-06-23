@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer } from "react";
 import { api, apiBase } from "../api";
 import { normalizeTicker } from "../format";
+import useRealtimeFeed from "../hooks/useRealtimeFeed";
 
 const emptyDashboard = {
   portfolio: null,
@@ -69,6 +70,7 @@ const AppContext = createContext(null);
 
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const realtime = useRealtimeFeed();
 
   const loadTicker = useCallback(async (ticker) => {
     if (!ticker) return;
@@ -271,6 +273,8 @@ export function AppProvider({ children }) {
     resetPaperAccount,
     loadTradeHistory,
     isBusy: state.status.loading || Boolean(state.status.action),
+    // Real-time feed
+    realtime,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

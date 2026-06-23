@@ -26,14 +26,50 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: connect DB + seed portfolio + start scheduler.  Shutdown: close all."""
-    logger.info("Starting Paper Trading Agent...")
+    """Startup: connect DB + seed portfolio + init Dhan + start scheduler.  Shutdown: close all."""
+    logger.info("Starting NexusTrade Agent...")
     await connect_db()
     logger.info("Database connected and portfolio initialized.")
+
+    # Initialize kill switch
+    from kill_switch import initialize_kill_switch
+    await initialize_kill_switch()
+
+    # Initialize Dhan client from saved credentials (MongoDB) or .env
+    from dhan_client import dhan_client
+    from routers.trading_mode import load_and_configure_dhan
+
+    # Try loading credentials saved from the UI (MongoDB)
+    db_loaded = await load_and_configure_dhan()
+    if db_loaded:
+        logger.info("Dhan credentials loaded from database")
+
+    # If credentials are available (from DB or .env), try to connect
+    if dhan_client.is_configured:
+        from security_master import security_master
+        dhan_init = await dhan_client.initialize()
+        logger.info(
+            f"Dhan client: {dhan_init.get('status', 'unknown')}"
+        )
+        sec_init = await security_master.load()
+        logger.info(
+            f"Security master: {sec_init.get('status', 'unknown')} "
+            f"({sec_init.get('count', 0)} instruments)"
+        )
+
+        # Start real-time market feed (Dhan WebSocket)
+        from market_feed import start_market_feed
+        await start_market_feed()
+    else:
+        logger.info("Dhan not configured — paper-only mode")
+
     start_scheduler()
     if settings.run_analysis_on_startup:
         asyncio.create_task(_run_startup_analysis())
     yield
+    # Shutdown
+    from market_feed import stop_market_feed
+    await stop_market_feed()
     stop_scheduler()
     await close_db()
     logger.info("Shutdown complete.")
@@ -52,9 +88,9 @@ async def _run_startup_analysis():
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Paper Trading Swing-Trading AI Agent",
-    description="Transparent AI-powered paper trading for NSE/BSE Indian stocks",
-    version="1.0.0",
+    title="NexusTrade AI Agent",
+    description="AI-powered paper & live trading for NSE/BSE Indian stocks",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -84,7 +120,8 @@ app.add_middleware(
 
 # ── Mount Routers ────────────────────────────────────────────────────────────
 
-from routers import portfolio, trades, analysis, market, news, analytics  # noqa: E402
+from routers import portfolio, trades, analysis, market, news, analytics, trading_mode  # noqa: E402
+from routers import realtime  # noqa: E402
 
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
 app.include_router(trades.router, prefix="/api", tags=["Trades"])
@@ -92,16 +129,25 @@ app.include_router(analysis.router, prefix="/api", tags=["Analysis"])
 app.include_router(market.router, prefix="/api", tags=["Market Data"])
 app.include_router(news.router, prefix="/api", tags=["News Intelligence"])
 app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
+app.include_router(trading_mode.router, prefix="/api", tags=["Trading Mode"])
+app.include_router(realtime.router, prefix="/api", tags=["Real-Time Feed"])
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────
 
 @app.get("/api/health", tags=["System"])
 async def health_check():
+    from kill_switch import is_kill_switch_on
+    from market_feed import is_feed_connected
+    kill_switch = await is_kill_switch_on()
     return {
         "status": "healthy",
-        "service": "Paper Trading AI Agent",
+        "service": "NexusTrade AI Agent",
         "market": "NSE/BSE (India)",
+        "trading_mode": settings.trading_mode,
+        "kill_switch_active": kill_switch,
+        "dhan_enabled": settings.dhan_trading_enabled,
+        "realtime_feed": is_feed_connected(),
     }
 
 

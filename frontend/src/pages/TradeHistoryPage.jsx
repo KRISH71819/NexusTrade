@@ -5,6 +5,7 @@ import {
   ChevronRight,
   History,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { gsap } from "gsap";
 import { useApp } from "../context/AppContext";
 import Topbar from "../components/Topbar";
@@ -139,6 +140,8 @@ export default function TradeHistoryPage() {
 }
 
 function TradeRow({ trade, hasPnl, isExpanded, onToggle }) {
+  const { loadTicker } = useApp();
+  const navigate = useNavigate();
   return (
     <>
       <tr onClick={onToggle} style={{ cursor: "pointer" }}>
@@ -153,7 +156,19 @@ function TradeRow({ trade, hasPnl, isExpanded, onToggle }) {
           />
         </td>
         <td>{dateTime(trade.timestamp)}</td>
-        <td><strong>{trade.ticker}</strong></td>
+        <td>
+          <strong
+            style={{ cursor: "pointer", color: "var(--accent)" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              loadTicker(trade.ticker);
+              navigate("/");
+            }}
+            title={`Inspect ${trade.ticker}`}
+          >
+            {trade.ticker}
+          </strong>
+        </td>
         <td><ActionPill action={trade.action} /></td>
         <td>{Number(trade.quantity || 0).toLocaleString("en-IN")}</td>
         <td>{money(trade.price)}</td>

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -10,24 +10,81 @@ import {
   TrendingDown,
   TrendingUp,
   Wallet,
+  Globe,
 } from "lucide-react";
 import { gsap } from "gsap";
 import { createChart } from "lightweight-charts";
 import { useApp } from "../context/AppContext";
+import { useNavigate } from "react-router-dom";
 import Topbar from "../components/Topbar";
 import MetricCard from "../components/MetricCard";
 import ActionPill from "../components/ActionPill";
 import EmptyState from "../components/EmptyState";
-import { money, percent, dateTime, compactMoney } from "../format";
+import PriceTicker from "../components/PriceTicker";
+import { money, percent, dateTime, compactMoney, signedClass } from "../format";
 
 export default function DashboardPage() {
-  const { dashboard, pnlData, status, watchlistRows, loadTicker } = useApp();
+  const { dashboard, pnlData, status, watchlistRows, loadTicker, realtime, selectedTicker, selectedAnalysis } = useApp();
+  const navigate = useNavigate();
   const portfolio = dashboard.portfolio || {};
   const holdings = portfolio.holdings || [];
   const riskStatus = portfolio.risk_status || {};
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
   const contentRef = useRef(null);
+
+  const monthlyPnl = useMemo(() => {
+    const currentValue = pnlData.total_portfolio_value || portfolio.total_value || 1000000;
+    const history = dashboard.portfolioHistory || [];
+    if (history.length === 0) {
+      return { value: 0, pct: 0 };
+    }
+    
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() - 30);
+    
+    let closestSnapshot = null;
+    let minDiff = Infinity;
+    
+    for (const snap of history) {
+      if (!snap.timestamp) continue;
+      const snapDate = new Date(snap.timestamp);
+      if (snapDate <= targetDate) {
+        const diff = targetDate - snapDate;
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestSnapshot = snap;
+        }
+      }
+    }
+    
+    const baseValue = closestSnapshot 
+      ? closestSnapshot.total_value 
+      : (history[0]?.total_value || portfolio.initial_balance || 1000000);
+      
+    const value = currentValue - baseValue;
+    const pct = baseValue > 0 ? (value / baseValue) * 100 : 0;
+    return { value, pct };
+  }, [pnlData.total_portfolio_value, portfolio.total_value, portfolio.initial_balance, dashboard.portfolioHistory]);
+
+  const news = dashboard.news || {};
+  const macroNews = news.macro_news || [];
+  const tickerNews = news.ticker_news || [];
+  
+  const topNewsScores = useMemo(() => {
+    const hasScores = tickerNews.some(t => (t.overall_news_score || 0) !== 0);
+    if (!hasScores && watchlistRows.length > 0) {
+      return [...watchlistRows]
+        .map(r => ({
+          ticker: r.ticker,
+          overall_news_score: r.sentiment,
+          sector: dashboard.analyses.find(a => a.ticker === r.ticker)?.sector || "Sector",
+          crisis_detected: dashboard.analyses.find(a => a.ticker === r.ticker)?.crisis_detected || false,
+        }))
+        .sort((a, b) => (b.overall_news_score || 0) - (a.overall_news_score || 0));
+    }
+    return [...tickerNews].sort((a, b) => (b.overall_news_score || 0) - (a.overall_news_score || 0));
+  }, [tickerNews, watchlistRows, dashboard.analyses]);
 
   // Equity curve chart
   useEffect(() => {
@@ -53,16 +110,16 @@ export default function DashboardPage() {
       rightPriceScale: { borderColor: "#2a2e39" },
       timeScale: { borderColor: "#2a2e39", timeVisible: true },
       crosshair: {
-        vertLine: { color: "rgba(41, 98, 255, 0.5)", labelBackgroundColor: "#2962ff" },
-        horzLine: { color: "rgba(41, 98, 255, 0.5)", labelBackgroundColor: "#2962ff" },
+        vertLine: { color: "rgba(120, 123, 134, 0.4)", labelBackgroundColor: "#2a2e39" },
+        horzLine: { color: "rgba(120, 123, 134, 0.4)", labelBackgroundColor: "#2a2e39" },
       },
       localization: { priceFormatter: (p) => compactMoney(p) },
     });
 
     const areaSeries = chart.addAreaSeries({
-      topColor: "rgba(41, 98, 255, 0.25)",
-      bottomColor: "rgba(41, 98, 255, 0.02)",
-      lineColor: "#2962ff",
+      topColor: "rgba(8, 153, 129, 0.2)",
+      bottomColor: "rgba(8, 153, 129, 0.01)",
+      lineColor: "var(--green)",
       lineWidth: 2,
     });
 
@@ -133,6 +190,7 @@ export default function DashboardPage() {
   return (
     <>
       <Topbar title="Dashboard" subtitle="Portfolio overview & market intelligence" />
+      <PriceTicker prices={realtime.prices} holdings={holdings} />
       <div ref={contentRef}>
         {/* Status Notice */}
         {(status.error || status.message) && (
@@ -151,7 +209,11 @@ export default function DashboardPage() {
         )}
 
         {/* KPI Metrics */}
-        <section className="metrics-grid" style={{ marginBottom: "20px" }}>
+        <section className="metrics-grid" style={{ 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', 
+          gap: '12px',
+          marginBottom: "20px" 
+        }}>
           <MetricCard
             icon={<CircleDollarSign size={18} />}
             label="Portfolio Value"
@@ -174,6 +236,14 @@ export default function DashboardPage() {
             value={money(pnlData.weekly_pnl.value)}
             sub={percent(pnlData.weekly_pnl.pct)}
             trend={pnlData.weekly_pnl.value}
+            glow
+          />
+          <MetricCard
+            icon={monthlyPnl.value >= 0 ? <ArrowUpRight size={18} /> : <ArrowDownRight size={18} />}
+            label="Monthly P&L"
+            value={money(monthlyPnl.value)}
+            sub={percent(monthlyPnl.pct)}
+            trend={monthlyPnl.value}
             glow
           />
           <MetricCard
@@ -257,7 +327,16 @@ export default function DashboardPage() {
                     {dashboard.trades.slice(0, 8).map((trade, i) => (
                       <tr key={`${trade.timestamp}-${i}`}>
                         <td>{dateTime(trade.timestamp)}</td>
-                        <td><strong>{trade.ticker}</strong></td>
+                        <td
+                          style={{ cursor: "pointer", color: "var(--accent)" }}
+                          onClick={() => {
+                            loadTicker(trade.ticker);
+                            navigate("/");
+                          }}
+                          title={`Inspect ${trade.ticker}`}
+                        >
+                          <strong>{trade.ticker}</strong>
+                        </td>
                         <td><ActionPill action={trade.action} /></td>
                         <td>{money(trade.price)}</td>
                       </tr>
@@ -286,7 +365,12 @@ export default function DashboardPage() {
                 <div
                   key={row.ticker}
                   className="watchlist-item"
-                  style={{ cursor: "default" }}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => {
+                    loadTicker(row.ticker);
+                    navigate("/");
+                  }}
+                  title={`Inspect ${row.ticker}`}
                 >
                   <div>
                     <strong>{row.ticker}</strong>
@@ -300,6 +384,137 @@ export default function DashboardPage() {
               ))}
               {watchlistRows.length === 0 && (
                 <EmptyState title="No data" text="Connect backend to load watchlist." />
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* News Intelligence Section */}
+        <div className="section-label" style={{ marginTop: "24px", marginBottom: "12px", fontSize: "14px", fontWeight: "700" }}>
+          News Intelligence & Sentiment
+        </div>
+        <div className="detail-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px', marginBottom: "20px" }}>
+          {/* Global & India Macro Headlines */}
+          <div className="detail-panel">
+            <div className="panel-title-row compact">
+              <div>
+                <h2>
+                  <Globe size={16} />
+                  Global & India Macro ({macroNews.length})
+                </h2>
+                <span>Market-wide headlines affecting all tickers</span>
+              </div>
+            </div>
+            <div className="news-list" style={{ maxHeight: 350, overflowY: "auto", marginTop: "12px" }}>
+              {macroNews.length > 0 ? (
+                macroNews.slice(0, 10).map((item, i) => (
+                  <div className="news-item" key={`macro-${i}`}>
+                    <strong>
+                      <span style={{
+                        display: "inline-grid",
+                        placeItems: "center",
+                        width: "20px",
+                        height: "20px",
+                        marginRight: "6px",
+                        borderRadius: "var(--radius-sm)",
+                        background: "var(--accent-soft)",
+                        color: "var(--accent)",
+                        fontSize: "10px",
+                        fontWeight: 900,
+                      }}>M</span>
+                      {typeof item === "string" ? item : item.headline || "Untitled"}
+                    </strong>
+                    <small>
+                      {typeof item === "object" ? item.source || "News" : "Google News"}
+                    </small>
+                  </div>
+                ))
+              ) : (
+                <EmptyState title="No macro news" text="No global news headlines loaded." />
+              )}
+            </div>
+          </div>
+
+          {/* Stock Specific Headlines Column */}
+          <div className="detail-panel">
+            <div className="panel-title-row compact">
+              <div>
+                <h2>
+                  <Globe size={16} style={{ color: 'var(--accent)' }} />
+                  {selectedTicker || "Stock"} Headlines
+                </h2>
+                <span>Ticker-specific headlines used by strategy</span>
+              </div>
+            </div>
+            <div className="news-list" style={{ maxHeight: 350, overflowY: "auto", marginTop: "12px" }}>
+              {selectedAnalysis?.news_headlines && selectedAnalysis.news_headlines.length > 0 ? (
+                selectedAnalysis.news_headlines.slice(0, 10).map((h, i) => (
+                  <div className="news-item" key={`stock-headline-${i}`}>
+                    <strong>
+                      <span style={{
+                        display: "inline-grid",
+                        placeItems: "center",
+                        width: "20px",
+                        height: "20px",
+                        marginRight: "6px",
+                        borderRadius: "var(--radius-sm)",
+                        background: "var(--accent-soft)",
+                        color: "var(--accent)",
+                        fontSize: "10px",
+                        fontWeight: 900,
+                      }}>{i + 1}</span>
+                      {h}
+                    </strong>
+                    <small>LLM analysis input</small>
+                  </div>
+                ))
+              ) : (
+                <EmptyState
+                  title="No headlines"
+                  text={selectedTicker ? `No headlines found for ${selectedTicker}.` : "Select a ticker to see headlines."}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* Top News Sentiment Scores */}
+          <div className="detail-panel">
+            <div className="panel-title-row compact">
+              <div>
+                <h2>
+                  <TrendingUp size={16} />
+                  Top News Sentiment Scores ({topNewsScores.length})
+                </h2>
+                <span>Tickers sorted by highest overall news score</span>
+              </div>
+            </div>
+            <div className="news-list" style={{ maxHeight: 350, overflowY: "auto", marginTop: "12px" }}>
+              {topNewsScores.length > 0 ? (
+                topNewsScores.slice(0, 10).map((t, i) => (
+                  <div
+                    className="news-item"
+                    key={`news-score-${i}`}
+                    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                    onClick={() => {
+                      loadTicker(t.ticker);
+                      navigate("/");
+                    }}
+                    title={`Inspect ${t.ticker}`}
+                  >
+                    <div>
+                      <strong style={{ fontSize: '13px' }}>{t.ticker}</strong>
+                      <small style={{ color: 'var(--muted)', fontSize: '10.5px', display: 'block', marginTop: '2px' }}>{t.sector}</small>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', textAlign: 'right' }}>
+                      <strong className={signedClass(t.overall_news_score)} style={{ fontFamily: "JetBrains Mono, monospace" }}>
+                        {t.overall_news_score >= 0 ? "+" : ""}{t.overall_news_score?.toFixed(3) || "0.000"}
+                      </strong>
+                      {t.crisis_detected && <span className="action-pill sell" style={{ fontSize: "8px", padding: '1px 3px' }}>CRISIS</span>}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <EmptyState title="No scores" text="No news sentiment scores loaded." />
               )}
             </div>
           </div>

@@ -1,6 +1,7 @@
-﻿"""
+"""
 MongoDB connection + collection initialization.
 Seeds the portfolio with starting balance on first run.
+Provides separate collections for paper and live trading modes.
 """
 
 from pymongo import AsyncMongoClient
@@ -70,7 +71,7 @@ def get_db():
     return _db
 
 
-# ── Collections ──────────────────────────────────────────────────────────────
+# ── Collections (Paper Trading — existing) ───────────────────────────────────
 
 def get_portfolio_collection():
     return get_db()["portfolio"]
@@ -92,27 +93,69 @@ def get_portfolio_history_collection():
     return get_db()["portfolio_history"]
 
 
+# ── Collections (Live Trading — complete isolation) ──────────────────────────
+
+def get_live_portfolio_collection():
+    return get_db()["live_portfolio"]
+
+
+def get_live_trades_collection():
+    return get_db()["live_trades"]
+
+
+def get_live_portfolio_history_collection():
+    return get_db()["live_portfolio_history"]
+
+
+# ── Collections (System State) ───────────────────────────────────────────────
+
+def get_system_state_collection():
+    return get_db()["system_state"]
+
+
+# ── Mode-aware collection helpers ────────────────────────────────────────────
+
+def get_portfolio_collection_for_mode(mode: str = "paper"):
+    """Get the portfolio collection for the given trading mode."""
+    if mode == "live":
+        return get_live_portfolio_collection()
+    return get_portfolio_collection()
+
+
+def get_trades_collection_for_mode(mode: str = "paper"):
+    """Get the trades collection for the given trading mode."""
+    if mode == "live":
+        return get_live_trades_collection()
+    return get_trades_collection()
+
+
+def get_portfolio_history_collection_for_mode(mode: str = "paper"):
+    """Get the portfolio history collection for the given trading mode."""
+    if mode == "live":
+        return get_live_portfolio_history_collection()
+    return get_portfolio_history_collection()
+
+
 # ── Indexes ──────────────────────────────────────────────────────────────────
 
 async def _ensure_indexes():
     """Create indexes for efficient queries."""
     db = get_db()
 
-    # Trades: query by ticker and timestamp
+    # Paper trading indexes (existing)
     await db["trades"].create_index([("ticker", 1), ("timestamp", -1)])
     await db["trades"].create_index([("timestamp", -1)])
-
-    # Analysis log: query by ticker and timestamp
     await db["analysis_log"].create_index([("ticker", 1), ("timestamp", -1)])
     await db["analysis_log"].create_index([("timestamp", -1)])
-
-    # Market data: one doc per ticker, indexed
     await db["market_data"].create_index("ticker", unique=True)
-
-    # Portfolio history: time-series
     await db["portfolio_history"].create_index([("timestamp", -1)])
 
-    logger.info("MongoDB indexes ensured.")
+    # Live trading indexes (same structure, separate collections)
+    await db["live_trades"].create_index([("ticker", 1), ("timestamp", -1)])
+    await db["live_trades"].create_index([("timestamp", -1)])
+    await db["live_portfolio_history"].create_index([("timestamp", -1)])
+
+    logger.info("MongoDB indexes ensured (paper + live).")
 
 
 # ── Seed ─────────────────────────────────────────────────────────────────────

@@ -1,11 +1,12 @@
 """
-Virtual Trading Ledger — manages paper-trading portfolio operations.
-Every trade is logged with full AI brain transparency data.
+Trading Ledger — manages both paper and live trading portfolio operations.
 
-Key improvements:
-  - Uses LIVE market prices for holdings valuation (not avg_price)
-  - Tracks peak_price per holding for trailing stops
-  - Tracks portfolio peak_value for drawdown calculation
+Dual-mode architecture:
+  - Paper mode: Virtual cash, simulated slippage/charges (existing behavior)
+  - Live mode: Real orders via Dhan API, actual market execution
+
+Both modes share the same analysis pipeline. Only the execution layer differs.
+Kill switch blocks all BUYs in both modes but allows SELLs.
 """
 
 from datetime import datetime, timezone
@@ -18,6 +19,10 @@ from database import (
     get_trades_collection,
     get_analysis_collection,
     get_portfolio_history_collection,
+    get_portfolio_collection_for_mode,
+    get_trades_collection_for_mode,
+    get_portfolio_history_collection_for_mode,
+    get_live_portfolio_collection,
 )
 from models import TradeAction, AnalysisResult, Portfolio, Holding
 from config import settings
@@ -661,11 +666,411 @@ def _build_trade_doc(
     return doc
 
 
-async def _record_snapshot(cash: float, holdings_value: float, total_value: float):
+async def _record_snapshot(cash: float, holdings_value: float, total_value: float, mode: str = "paper"):
     """Record a portfolio value snapshot for historical tracking."""
-    await get_portfolio_history_collection().insert_one({
+    await get_portfolio_history_collection_for_mode(mode).insert_one({
         "timestamp": datetime.now(timezone.utc),
         "cash": round(cash, 2),
         "holdings_value": round(holdings_value, 2),
         "total_value": round(total_value, 2),
+        "mode": mode,
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   LIVE TRADING (Dhan API)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_live_portfolio() -> dict:
+    """Get live portfolio state synced from Dhan account."""
+    try:
+        collection = get_live_portfolio_collection()
+        doc = await collection.find_one({"_id": "main"})
+
+        if doc is None:
+            # First time — sync from Dhan
+            return await sync_live_portfolio()
+
+        return doc
+    except PyMongoError as e:
+        logger.warning(f"MongoDB offline: {e}. Returning empty live portfolio.")
+        return {
+            "cash": 0,
+            "total_value": 0,
+            "holdings": [],
+            "initial_balance": 0,
+            "peak_value": 0,
+            "total_pnl": 0.0,
+            "total_pnl_pct": 0.0,
+            "mode": "live",
+        }
+
+
+async def sync_live_portfolio() -> dict:
+    """Sync live portfolio with Dhan account (funds + holdings)."""
+    from dhan_client import dhan_client
+
+    try:
+        # Fetch real account data from Dhan
+        funds_result = await dhan_client.get_fund_limits()
+        holdings_result = await dhan_client.get_holdings()
+
+        # Parse funds
+        funds_data = funds_result.get("data", funds_result) if isinstance(funds_result, dict) else {}
+        available_balance = float(funds_data.get("availabelBalance", funds_data.get("availableBalance", 0)))
+
+        # Parse holdings
+        holdings_list = []
+        holdings_value = 0.0
+        raw_holdings = []
+
+        if isinstance(holdings_result, dict):
+            raw_holdings = holdings_result.get("data", holdings_result.get("holdings", []))
+            if isinstance(raw_holdings, dict):
+                raw_holdings = [raw_holdings]
+
+        if isinstance(raw_holdings, list):
+            for h in raw_holdings:
+                if not isinstance(h, dict):
+                    continue
+                qty = int(h.get("totalQty", h.get("quantity", 0)))
+                if qty <= 0:
+                    continue
+
+                avg_price = float(h.get("avgCostPrice", h.get("avgPrice", 0)))
+                current_price = float(h.get("lastTradedPrice", h.get("ltp", avg_price)))
+                market_value = current_price * qty
+                holdings_value += market_value
+
+                holdings_list.append({
+                    "ticker": h.get("tradingSymbol", h.get("symbol", "UNKNOWN")),
+                    "quantity": qty,
+                    "avg_price": round(avg_price, 2),
+                    "current_price": round(current_price, 2),
+                    "market_value": round(market_value, 2),
+                    "unrealized_pnl": round((current_price - avg_price) * qty, 2),
+                    "unrealized_pnl_pct": round(
+                        ((current_price - avg_price) / avg_price) * 100, 2
+                    ) if avg_price > 0 else 0.0,
+                    "peak_price": round(max(current_price, avg_price), 2),
+                    "security_id": str(h.get("securityId", h.get("security_id", ""))),
+                    "exchange": h.get("exchange", "NSE"),
+                })
+
+        total_value = available_balance + holdings_value
+
+        # Upsert to live_portfolio collection
+        portfolio_doc = {
+            "_id": "main",
+            "cash": round(available_balance, 2),
+            "holdings": holdings_list,
+            "total_value": round(total_value, 2),
+            "holdings_value": round(holdings_value, 2),
+            "initial_balance": round(total_value, 2),  # Set initial as current on first sync
+            "peak_value": round(total_value, 2),
+            "total_pnl": 0.0,
+            "total_pnl_pct": 0.0,
+            "mode": "live",
+            "synced_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+        collection = get_live_portfolio_collection()
+
+        # Preserve initial_balance and peak_value from existing doc
+        existing = await collection.find_one({"_id": "main"})
+        if existing:
+            portfolio_doc["initial_balance"] = existing.get("initial_balance", total_value)
+            portfolio_doc["peak_value"] = max(existing.get("peak_value", 0), total_value)
+            initial = portfolio_doc["initial_balance"]
+            portfolio_doc["total_pnl"] = round(total_value - initial, 2)
+            portfolio_doc["total_pnl_pct"] = round(
+                ((total_value - initial) / initial) * 100, 2
+            ) if initial > 0 else 0.0
+
+        await collection.replace_one({"_id": "main"}, portfolio_doc, upsert=True)
+
+        logger.info(
+            f"Live portfolio synced: Cash Rs.{available_balance:,.2f}, "
+            f"{len(holdings_list)} holdings, Total Rs.{total_value:,.2f}"
+        )
+
+        portfolio_doc.pop("_id", None)
+        return portfolio_doc
+
+    except Exception as e:
+        logger.error(f"Failed to sync live portfolio: {e}")
+        return {"error": str(e), "mode": "live"}
+
+
+async def execute_live_buy(
+    ticker: str,
+    price: float,
+    analysis: AnalysisResult,
+    quantity: Optional[int] = None,
+    max_position_pct: Optional[float] = None,
+    atr: Optional[float] = None,
+) -> dict:
+    """
+    Execute a REAL BUY order via Dhan API.
+    Places the order on Dhan FIRST, then records to live_trades if successful.
+    """
+    from dhan_client import dhan_client
+    from security_master import security_master
+    from kill_switch import is_kill_switch_on
+
+    # Kill switch check
+    if await is_kill_switch_on():
+        logger.warning(f"KILL SWITCH ACTIVE — blocking LIVE BUY for {ticker}")
+        return {"error": "Kill switch active — buys blocked", "ticker": ticker}
+
+    # Get Dhan security ID
+    security_id = security_master.get_security_id(ticker)
+    if not security_id:
+        logger.error(f"No Dhan security ID found for {ticker} — cannot place live order")
+        return {"error": f"Security ID not found for {ticker}", "ticker": ticker}
+
+    # Get live portfolio for sizing
+    portfolio = await get_live_portfolio()
+    if portfolio.get("error"):
+        return {"error": f"Cannot get live portfolio: {portfolio['error']}", "ticker": ticker}
+
+    cash = portfolio.get("cash", 0)
+
+    # Auto-size quantity if not provided
+    if quantity is None:
+        position_pct = max_position_pct or settings.max_position_pct
+        trade_cap = settings.max_single_trade_pct
+        effective_pct = min(position_pct, trade_cap)
+        max_spend = portfolio.get("total_value", cash) * effective_pct
+
+        # Cash reserve
+        min_reserve = portfolio.get("total_value", cash) * settings.min_cash_reserve_pct
+        spendable = max(0, cash - min_reserve)
+        available = min(spendable, max_spend)
+        
+        # Apply Live Capital Cap (if > 0, otherwise it's Full Investment mode)
+        live_cap = getattr(settings, "live_capital_cap", 100000.0)
+        if live_cap > 0:
+            current_invested = sum(h.get("quantity", 0) * h.get("avg_price", 0) for h in portfolio.get("holdings", []))
+            allowed_by_cap = max(0.0, live_cap - current_invested)
+            available = min(available, allowed_by_cap)
+
+        if available < price:
+            return {"error": "Insufficient funds for live buy", "ticker": ticker}
+
+        quantity = int(available // price)
+
+        # ATR-based cap
+        if atr and atr > 0:
+            risk_budget = portfolio.get("total_value", cash) * settings.atr_risk_per_trade_pct
+            atr_stop_distance = atr * settings.atr_stop_multiplier
+            if atr_stop_distance > 0:
+                atr_qty = int(risk_budget / atr_stop_distance)
+                quantity = min(quantity, atr_qty)
+
+    if quantity <= 0:
+        return {"error": "Computed quantity is 0", "ticker": ticker}
+
+    # Pre-check: verify sufficient balance via Dhan
+    funds = await dhan_client.get_fund_limits()
+    if isinstance(funds, dict):
+        funds_data = funds.get("data", funds)
+        dhan_balance = float(funds_data.get("availabelBalance", funds_data.get("availableBalance", 0)))
+        total_cost_estimate = quantity * price
+        if dhan_balance < total_cost_estimate:
+            logger.warning(
+                f"Dhan balance Rs.{dhan_balance:,.2f} < estimated cost Rs.{total_cost_estimate:,.2f}"
+            )
+            return {"error": f"Insufficient Dhan balance (Rs.{dhan_balance:,.2f})", "ticker": ticker}
+
+    # ── PLACE REAL ORDER ON DHAN ──────────────────────────────────────
+    logger.info(f"🔴 PLACING LIVE BUY ORDER: {quantity}x {ticker} (security_id={security_id})")
+    result = await dhan_client.place_buy_order(
+        security_id=security_id,
+        quantity=quantity,
+        order_type="MARKET",
+    )
+
+    if result.get("status") != "success":
+        error = result.get("error", "Unknown Dhan error")
+        logger.error(f"LIVE BUY FAILED for {ticker}: {error}")
+        return {"error": f"Dhan order failed: {error}", "ticker": ticker, "dhan_response": result}
+
+    order_id = result.get("order_id", "unknown")
+    logger.info(f"✅ LIVE BUY SUCCESS: {quantity}x {ticker}, Order ID: {order_id}")
+
+    # Record trade in live_trades collection
+    trade_doc = _build_trade_doc(
+        ticker=ticker,
+        action=TradeAction.BUY,
+        quantity=quantity,
+        price=price,
+        total_value=quantity * price,
+        analysis=analysis,
+        cash_after=cash - (quantity * price),
+        portfolio_total=portfolio.get("total_value", 0),
+        charges=None,  # Dhan handles charges directly
+    )
+    trade_doc["mode"] = "live"
+    trade_doc["dhan_order_id"] = order_id
+    trade_doc["dhan_security_id"] = security_id
+
+    try:
+        await get_trades_collection_for_mode("live").insert_one(trade_doc)
+        await _log_analysis_decision(ticker, TradeAction.BUY, analysis)
+    except PyMongoError as e:
+        logger.warning(f"Could not log live BUY trade to MongoDB: {e}")
+
+    # Sync portfolio after trade
+    await sync_live_portfolio()
+
+    return trade_doc
+
+
+async def execute_live_sell(
+    ticker: str,
+    price: float,
+    analysis: AnalysisResult,
+    quantity: Optional[int] = None,
+) -> dict:
+    """
+    Execute a REAL SELL order via Dhan API.
+    Places the order on Dhan FIRST, then records to live_trades if successful.
+    """
+    from dhan_client import dhan_client
+    from security_master import security_master
+
+    # Get Dhan security ID
+    security_id = security_master.get_security_id(ticker)
+    if not security_id:
+        logger.error(f"No Dhan security ID found for {ticker} — cannot place live sell")
+        return {"error": f"Security ID not found for {ticker}", "ticker": ticker}
+
+    # Get live portfolio to check holdings
+    portfolio = await get_live_portfolio()
+    holdings = portfolio.get("holdings", [])
+
+    existing = None
+    for h in holdings:
+        if h.get("ticker", "").upper() == ticker.upper():
+            existing = h
+            break
+
+    if not existing or existing.get("quantity", 0) <= 0:
+        logger.warning(f"No live position to sell for {ticker}")
+        return {"error": "No position", "ticker": ticker}
+
+    if quantity is None:
+        quantity = existing["quantity"]
+
+    quantity = min(quantity, existing["quantity"])
+
+    # ── PLACE REAL ORDER ON DHAN ──────────────────────────────────────
+    logger.info(f"🔴 PLACING LIVE SELL ORDER: {quantity}x {ticker} (security_id={security_id})")
+    result = await dhan_client.place_sell_order(
+        security_id=security_id,
+        quantity=quantity,
+        order_type="MARKET",
+    )
+
+    if result.get("status") != "success":
+        error = result.get("error", "Unknown Dhan error")
+        logger.error(f"LIVE SELL FAILED for {ticker}: {error}")
+        return {"error": f"Dhan order failed: {error}", "ticker": ticker, "dhan_response": result}
+
+    order_id = result.get("order_id", "unknown")
+    logger.info(f"✅ LIVE SELL SUCCESS: {quantity}x {ticker}, Order ID: {order_id}")
+
+    # Record trade
+    trade_doc = _build_trade_doc(
+        ticker=ticker,
+        action=TradeAction.SELL,
+        quantity=quantity,
+        price=price,
+        total_value=quantity * price,
+        analysis=analysis,
+        cash_after=portfolio.get("cash", 0) + (quantity * price),
+        portfolio_total=portfolio.get("total_value", 0),
+        charges=None,
+    )
+    trade_doc["mode"] = "live"
+    trade_doc["dhan_order_id"] = order_id
+    trade_doc["dhan_security_id"] = security_id
+
+    try:
+        await get_trades_collection_for_mode("live").insert_one(trade_doc)
+        await _log_analysis_decision(ticker, TradeAction.SELL, analysis)
+    except PyMongoError as e:
+        logger.warning(f"Could not log live SELL trade to MongoDB: {e}")
+
+    # Sync portfolio after trade
+    await sync_live_portfolio()
+
+    return trade_doc
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   MODE-AWARE WRAPPERS (used by scheduler)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def execute_buy_for_mode(
+    ticker: str,
+    price: float,
+    analysis: AnalysisResult,
+    mode: str = "paper",
+    quantity: Optional[int] = None,
+    max_position_pct: Optional[float] = None,
+    atr: Optional[float] = None,
+) -> dict:
+    """Route buy execution to the correct mode handler."""
+    from kill_switch import is_kill_switch_on
+
+    # Kill switch check (only applies to live mode)
+    if mode == "live" and await is_kill_switch_on():
+        logger.warning(f"KILL SWITCH ACTIVE — blocking BUY for {ticker} (mode={mode})")
+        return {"error": "Kill switch active — buys blocked", "ticker": ticker}
+
+    if mode == "live":
+        return await execute_live_buy(ticker, price, analysis, quantity, max_position_pct, atr)
+    else:
+        return await execute_buy(ticker, price, analysis, quantity, max_position_pct, atr)
+
+
+async def execute_sell_for_mode(
+    ticker: str,
+    price: float,
+    analysis: AnalysisResult,
+    mode: str = "paper",
+    quantity: Optional[int] = None,
+) -> dict:
+    """Route sell execution to the correct mode handler."""
+    if mode == "live":
+        return await execute_live_sell(ticker, price, analysis, quantity)
+    else:
+        return await execute_sell(ticker, price, analysis, quantity)
+
+
+async def get_portfolio_for_mode(mode: str = "paper") -> dict:
+    """Get portfolio for the specified trading mode."""
+    if mode == "live":
+        portfolio = await get_live_portfolio()
+    else:
+        portfolio = await get_portfolio()
+
+    portfolio["mode"] = mode
+    return portfolio
+
+
+async def has_position_for_mode(ticker: str, mode: str = "paper") -> bool:
+    """Check if we hold a position in the given mode."""
+    portfolio = await get_portfolio_for_mode(mode)
+    for h in portfolio.get("holdings", []):
+        if h.get("ticker", "").upper() == ticker.upper() and h.get("quantity", 0) > 0:
+            return True
+    return False
+
+
+async def get_current_trading_mode() -> str:
+    """Get the currently active trading mode from config."""
+    return settings.trading_mode

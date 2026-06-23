@@ -19,21 +19,21 @@ export default function LoadingScreen() {
             width: 64,
             height: 64,
             borderRadius: "var(--radius-lg)",
-            background: "linear-gradient(135deg, var(--blue) 0%, var(--purple) 100%)",
+            background: "linear-gradient(135deg, var(--accent) 0%, var(--orange) 100%)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             fontSize: "1.5rem",
             fontWeight: 800,
-            color: "white",
-            boxShadow: "0 4px 16px rgba(41, 121, 255, 0.3)",
+            color: "black",
+            boxShadow: "0 0 15px var(--accent-glow)",
           }}
         >
           NT
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-        <Loader2 className="spin" size={18} style={{ color: "var(--blue)" }} />
+        <Loader2 className="spin" size={18} style={{ color: "var(--accent)" }} />
         <span style={{ color: "var(--text-secondary)", fontSize: "14px" }}>
           Connecting to NexusTrade AI...
         </span>

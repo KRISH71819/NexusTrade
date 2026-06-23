@@ -43,4 +43,59 @@ export const api = {
   pnlAnalytics: () => request("/api/analytics/pnl"),
   tradeHistory: (page = 1, pageSize = 50) =>
     request(`/api/analytics/trade-history?page=${page}&page_size=${pageSize}`),
+
+  // ── Trading Mode ──────────────────────────────────────────────────────
+  getTradingMode: () => request("/api/trading/mode"),
+  setTradingMode: (mode) =>
+    request("/api/trading/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+
+  // Kill Switch
+  getKillSwitch: () => request("/api/trading/kill-switch"),
+  toggleKillSwitch: (enabled) =>
+    request("/api/trading/kill-switch", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // Dhan Account
+  getDhanStatus: () => request("/api/trading/dhan/status"),
+  getDhanFunds: () => request("/api/trading/dhan/funds"),
+  getDhanHoldings: () => request("/api/trading/dhan/holdings"),
+  syncDhanPortfolio: () => request("/api/trading/dhan/sync", { method: "POST" }),
+
+  // Dhan Credentials (SaaS — save/load from DB)
+  getDhanCredentials: () => request("/api/trading/dhan/credentials"),
+  saveDhanCredentials: (client_id, pin, totp_secret, access_token) =>
+    request("/api/trading/dhan/credentials", {
+      method: "POST",
+      body: JSON.stringify({ client_id, pin, totp_secret, access_token }),
+    }),
+  deleteDhanCredentials: () =>
+    request("/api/trading/dhan/credentials", { method: "DELETE" }),
+  
+  // Capital Cap
+  getCapitalCap: () => request("/api/trading/capital-cap"),
+  setCapitalCap: (max_capital) =>
+    request("/api/trading/capital-cap", {
+      method: "POST",
+      body: JSON.stringify({ max_capital: Number(max_capital) }),
+    }),
+
+  // ── Real-Time Feed ────────────────────────────────────────────────────
+  realtimeStatus: () => request("/api/realtime/status"),
+  realtimePrices: () => request("/api/realtime/prices"),
 };
+
+/**
+ * Build the WebSocket URL for the real-time market feed.
+ * Derives ws:// or wss:// from the REST API base URL.
+ */
+export function getWsUrl() {
+  const base = API_BASE || window.location.origin;
+  const wsProtocol = base.startsWith("https") ? "wss" : "ws";
+  const httpBase = base.replace(/^https?:\/\//, "");
+  return `${wsProtocol}://${httpBase}/api/ws/market`;
+}

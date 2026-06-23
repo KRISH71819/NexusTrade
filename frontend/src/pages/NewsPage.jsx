@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import {
   AlertTriangle,
   Globe,
@@ -6,16 +6,31 @@ import {
 } from "lucide-react";
 import { gsap } from "gsap";
 import { useApp } from "../context/AppContext";
+import { useNavigate } from "react-router-dom";
 import Topbar from "../components/Topbar";
 import EmptyState from "../components/EmptyState";
 import { signedClass } from "../format";
 
 export default function NewsPage() {
-  const { dashboard, selectedAnalysis, selectedTicker } = useApp();
+  const { dashboard, selectedAnalysis, selectedTicker, watchlistRows, loadTicker } = useApp();
+  const navigate = useNavigate();
   const news = dashboard.news;
   const macroNews = news?.macro_news || [];
   const tickerNews = news?.ticker_news || [];
   const crisisAlerts = news?.crisis_alerts || [];
+
+  const displayTickerNews = useMemo(() => {
+    const hasScores = tickerNews.some(t => (t.overall_news_score || 0) !== 0);
+    if (!hasScores && watchlistRows.length > 0) {
+      return [...watchlistRows].map(r => ({
+        ticker: r.ticker,
+        overall_news_score: r.sentiment,
+        sector: dashboard.analyses.find(a => a.ticker === r.ticker)?.sector || "Sector",
+        crisis_detected: dashboard.analyses.find(a => a.ticker === r.ticker)?.crisis_detected || false,
+      }));
+    }
+    return tickerNews;
+  }, [tickerNews, watchlistRows, dashboard.analyses]);
   const headlines = selectedAnalysis?.news_headlines || [];
   const contentRef = useRef(null);
 
@@ -47,7 +62,17 @@ export default function NewsPage() {
               <strong>Crisis Alerts Active</strong>
               {crisisAlerts.map((a, i) => (
                 <div key={i} style={{ marginTop: 4, fontSize: "13px" }}>
-                  <strong>{a.ticker}:</strong> {a.reason}
+                  <strong
+                    style={{ cursor: "pointer", textDecoration: "underline", color: "var(--accent)" }}
+                    onClick={() => {
+                      loadTicker(a.ticker);
+                      navigate("/");
+                    }}
+                    title={`Inspect ${a.ticker}`}
+                  >
+                    {a.ticker}:
+                  </strong>{" "}
+                  {a.reason}
                 </div>
               ))}
             </div>
@@ -78,9 +103,9 @@ export default function NewsPage() {
                         height: "20px",
                         marginRight: "6px",
                         borderRadius: "var(--radius-sm)",
-                        background: "var(--blue-soft)",
-                        color: "#93b5ff",
-                        fontIndex: "10px",
+                        background: "var(--accent-soft)",
+                        color: "var(--accent)",
+                        fontSize: "10px",
                         fontWeight: 900,
                       }}>M</span>
                       {typeof item === "string" ? item : item.headline || "Untitled"}
@@ -119,8 +144,8 @@ export default function NewsPage() {
                         height: "20px",
                         marginRight: "6px",
                         borderRadius: "var(--radius-sm)",
-                        background: "var(--blue-soft)",
-                        color: "#93b5ff",
+                        background: "var(--accent-soft)",
+                        color: "var(--accent)",
                         fontSize: "10px",
                         fontWeight: 900,
                       }}>{i + 1}</span>
@@ -147,17 +172,26 @@ export default function NewsPage() {
         </div>
 
         {/* Per-Ticker News Scores */}
-        {tickerNews.length > 0 && (
+        {displayTickerNews.length > 0 && (
           <div className="detail-panel" style={{ marginTop: "16px" }}>
             <div className="panel-title-row compact">
               <div>
-                <h2>📊 Per-Ticker News Scores ({tickerNews.length})</h2>
+                <h2>📊 Per-Ticker News Scores ({displayTickerNews.length})</h2>
                 <span>Sentiment scores computed from news analysis</span>
               </div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "8px", marginTop: "12px" }}>
-              {tickerNews.slice(0, 24).map((t, i) => (
-                <div className="news-item" key={i} style={{ background: "var(--bg-elevated)", border: "1px solid var(--border)" }}>
+              {displayTickerNews.slice(0, 24).map((t, i) => (
+                <div
+                  className="news-item"
+                  key={i}
+                  style={{ background: "var(--bg-elevated)", border: "1px solid var(--border)", cursor: "pointer" }}
+                  onClick={() => {
+                    loadTicker(t.ticker);
+                    navigate("/");
+                  }}
+                  title={`Inspect ${t.ticker}`}
+                >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <strong>{t.ticker}</strong>
                     {t.crisis_detected && <span className="action-pill sell" style={{ fontSize: "9px" }}>CRISIS</span>}

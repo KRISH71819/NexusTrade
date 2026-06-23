@@ -140,7 +140,27 @@ class Settings(BaseSettings):
             ]
         return v
 
-    # ── Scheduler ────────────────────────────────────────────────────────
+    # ── Dhan Broker API ────────────────────────────────────────────────
+    dhan_client_id: str = ""
+    dhan_pin: str = ""
+    dhan_totp_secret: str = ""
+    dhan_access_token: str = ""  # Manual token from api.dhan.co (fallback if TOTP fails)
+    dhan_trading_enabled: bool = False  # Master switch for Dhan integration
+    live_capital_cap: float = 100000.0  # 0 means Full Investment
+
+    # ── Trading Mode ─────────────────────────────────────────────────
+    trading_mode: str = "paper"  # "paper" or "live"
+
+    # ── Global Kill Switch ───────────────────────────────────────────
+    kill_switch_enabled: bool = False  # When True: no new BUYs, only SELLs
+
+    # ── Real-Time Market Feed (Dhan WebSocket) ───────────────────────
+    realtime_enabled: bool = True              # Master switch for real-time feed
+    realtime_candle_intervals: List[str] = ["1m", "5m", "15m"]  # Candle intervals built from ticks
+    realtime_tick_batch_ms: int = 250          # Batch frontend WS updates every 250ms
+    realtime_subscribe_watchlist: bool = True  # Subscribe to entire NIFTY 500 (not just held stocks)
+
+    # ── Scheduler ────────────────────────────────────────────────────
     scheduler_timezone: str = "Asia/Kolkata"
     market_open_hour: int = 9
     market_open_minute: int = 15

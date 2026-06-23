@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { probability, sentiment, signedClass } from "../format";
 
 export default function ScoreGauge({
@@ -8,8 +9,17 @@ export default function ScoreGauge({
   threshold,
   value,
 }) {
+  const [animatedValue, setAnimatedValue] = useState(min);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAnimatedValue(value);
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [value, min]);
+
   const range = max - min;
-  const percent = clamp((value - min) / range, 0, 1);
+  const percent = clamp((animatedValue - min) / range, 0, 1);
   const angle = -120 + percent * 240;
   const display = sentimentMode ? sentiment(value) : probability(value);
   const tone = sentimentMode ? signedClass(value) : value >= threshold ? "positive" : "";
@@ -32,7 +42,7 @@ export default function ScoreGauge({
           y2="40"
           style={{ transform: `rotate(${angle}deg)`, transformOrigin: "90px 92px" }}
         />
-        <circle cx="90" cy="92" r="4" fill="#d1d4dc" />
+        <circle cx="90" cy="92" r="4.5" fill="var(--text)" />
       </svg>
       <span>{label}</span>
       <strong className={tone}>{display}</strong>
