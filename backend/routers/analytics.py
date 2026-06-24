@@ -37,7 +37,7 @@ _IST_OFFSET = timedelta(hours=5, minutes=30)
 def _market_open_today_utc(now_utc: datetime) -> datetime:
     """
     Get today's Indian market open time (9:15 IST) in UTC.
-    If current time is before 9:15 IST, returns yesterday's 9:15 IST.
+    If current time is before 9:15 IST, returns today's 9:15 IST (future anchor).
     """
     now_ist = now_utc + _IST_OFFSET
     market_open_ist = now_ist.replace(
@@ -45,10 +45,15 @@ def _market_open_today_utc(now_utc: datetime) -> datetime:
         minute=settings.market_open_minute,
         second=0, microsecond=0,
     )
-    if now_ist < market_open_ist:
-        # Before today's market open — use previous day's open
-        market_open_ist -= timedelta(days=1)
+    # Always return today's market open (even if it's in the past or future)
     return market_open_ist - _IST_OFFSET  # convert back to UTC
+
+
+def _today_midnight_utc(now_utc: datetime) -> datetime:
+    """Get today's midnight (00:00) IST in UTC — the earliest possible today anchor."""
+    now_ist = now_utc + _IST_OFFSET
+    midnight_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight_ist - _IST_OFFSET
 
 
 def _week_start_utc(now_utc: datetime) -> datetime:
@@ -79,6 +84,42 @@ async def _get_snapshot_value_at(timestamp: datetime, mode: str = "paper") -> Op
     docs = await cursor.to_list(length=1)
     if docs:
         return docs[0].get("total_value")
+    return None
+
+
+async def _get_day_base_value(now_utc: datetime, mode: str = "paper") -> Optional[float]:
+    """
+    Get the correct daily baseline value. Priority:
+      1. Snapshot at or just before 9:15 IST today (ideal — server was running at open)
+      2. First snapshot recorded today (server started after market open)
+    Returns None only if NO snapshots exist for today at all.
+    """
+    collection = get_portfolio_history_collection_for_mode(mode)
+    market_open = _market_open_today_utc(now_utc)
+    today_midnight = _today_midnight_utc(now_utc)
+
+    # Try: snapshot at or just before 9:15 IST today
+    cursor = collection.find(
+        {"timestamp": {"$gte": today_midnight, "$lte": market_open}},
+        {"_id": 0, "total_value": 1, "timestamp": 1},
+    ).sort("timestamp", -1).limit(1)
+    docs = await cursor.to_list(length=1)
+    if docs:
+        return docs[0].get("total_value")
+
+    # Fallback: first snapshot recorded today (server started after open)
+    cursor2 = collection.find(
+        {"timestamp": {"$gte": today_midnight}},
+        {"_id": 0, "total_value": 1, "timestamp": 1},
+    ).sort("timestamp", 1).limit(1)
+    docs2 = await cursor2.to_list(length=1)
+    if docs2:
+        logger.debug(
+            f"Daily P&L: no snapshot at market open, using first-today snapshot "
+            f"at {docs2[0].get('timestamp')}"
+        )
+        return docs2[0].get("total_value")
+
     return None
 
 
@@ -158,8 +199,10 @@ async def get_pnl_analytics(mode: str = Query(default=None)):
         total_realized = round(total_pnl - total_unrealized, 2)
 
         # ── DAILY P&L: change since market open today (9:15 IST) ─────────
-        day_anchor = _market_open_today_utc(now)
-        day_base_value = await _get_snapshot_value_at(day_anchor, active_mode)
+        # Uses today-only snapshots to avoid stale cross-day comparisons.
+        # If no 9:15 snapshot exists (server started late), falls back to
+        # the first snapshot recorded today.
+        day_base_value = await _get_day_base_value(now, active_mode)
 
         if day_base_value is not None:
             daily_pnl = round(current_value - day_base_value, 2)
@@ -167,7 +210,7 @@ async def get_pnl_analytics(mode: str = Query(default=None)):
                 (daily_pnl / day_base_value) * 100, 2
             ) if day_base_value > 0 else 0.0
         else:
-            # No snapshot exists before market open — likely first day
+            # No snapshots exist at all today — server just started, no baseline yet
             daily_pnl = 0.0
             daily_pnl_pct = 0.0
 
