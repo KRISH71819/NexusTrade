@@ -107,7 +107,24 @@ export default function TradingWorkspace() {
                         <div className="scanner-card-body">
                           <div className="scanner-metric">
                             <span>Current Price</span>
-                            <strong>{row.price ? money(row.price) : "--"}</strong>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <strong>{row.price ? money(row.price) : "--"}</strong>
+                              {row.change_pct !== 0 && (
+                                <span
+                                  style={{
+                                    fontSize: '10px',
+                                    fontWeight: 700,
+                                    fontFamily: 'JetBrains Mono, monospace',
+                                    color: row.change_pct >= 0 ? 'var(--green)' : 'var(--red)',
+                                    background: row.change_pct >= 0 ? 'rgba(8,153,129,0.12)' : 'rgba(242,54,69,0.12)',
+                                    padding: '1px 5px',
+                                    borderRadius: '4px',
+                                  }}
+                                >
+                                  {row.change_pct >= 0 ? '+' : ''}{row.change_pct.toFixed(2)}%
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <div className="scanner-metric-row">
                             <div className="scanner-metric-half">

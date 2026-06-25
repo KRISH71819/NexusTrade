@@ -228,6 +228,56 @@ export function AppProvider({ children }) {
     loadDashboard();
   }, [loadDashboard]);
 
+  // ── Fix 1: Wire WebSocket portfolio message → live P&L on dashboard ─────────
+  // Backend broadcasts { type:"portfolio", cash, total_value, holdings } every 5s.
+  // Merge it into pnlData so KPI cards update in real-time without a REST call.
+  useEffect(() => {
+    const lp = realtime.livePortfolio;
+    if (!lp) return;
+    const initial =
+      state.pnlData.initial_balance ||
+      state.dashboard.portfolio?.initial_balance ||
+      1000000;
+    const totalUnrealized = (lp.holdings || []).reduce(
+      (sum, h) => sum + (h.unrealized_pnl || 0),
+      0
+    );
+    const investedCapital = (lp.holdings || []).reduce(
+      (sum, h) => sum + (h.avg_price || 0) * (h.quantity || 0),
+      0
+    );
+    const totalPnl = lp.total_value - initial;
+    const totalPnlPct = initial > 0 ? (totalPnl / initial) * 100 : 0;
+    dispatch({
+      type: "SET_PNL",
+      payload: {
+        ...state.pnlData,
+        total_portfolio_value: lp.total_value,
+        cash: lp.cash,
+        total_unrealized_pnl: Math.round(totalUnrealized * 100) / 100,
+        total_realized_pnl: Math.round((totalPnl - totalUnrealized) * 100) / 100,
+        total_pnl: Math.round(totalPnl * 100) / 100,
+        total_pnl_pct: Math.round(totalPnlPct * 100) / 100,
+        invested_capital: Math.round(investedCapital * 100) / 100,
+      },
+    });
+  }, [realtime.livePortfolio]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Fix 3: Fallback REST poll every 15s when WebSocket feed is down ──────────
+  // Keeps the dashboard alive during market close or when Dhan creds are wrong.
+  useEffect(() => {
+    if (realtime.feedConnected) return; // WS is streaming — no REST polling needed
+    const id = setInterval(async () => {
+      try {
+        const pnl = await api.pnlAnalytics();
+        dispatch({ type: "SET_PNL", payload: pnl || emptyPnl });
+      } catch {
+        /* ignore — backend may be temporarily unreachable */
+      }
+    }, 15000);
+    return () => clearInterval(id);
+  }, [realtime.feedConnected]);
+
   const selectedAnalysis = useMemo(() => {
     if (state.analysisHistory.length) return state.analysisHistory[0];
     return (
@@ -245,20 +295,28 @@ export function AppProvider({ children }) {
     [state.dashboard.trades, state.selectedTicker]
   );
 
+  // ── Fix 2: Overlay live WebSocket prices on watchlist rows ──────────────────
+  // realtime.prices updates every 250ms from Dhan ticks.
+  // Without this, watchlist cards show stale analysis-time prices forever.
   const watchlistRows = useMemo(() => {
-    const rows = state.dashboard.analyses.map((a) => ({
-      ticker: a.ticker,
-      price: Number(a.current_price || a.price || 0),
-      ml: Number(a.ml_confidence || 0),
-      sentiment: Number(a.gemini_sentiment_score || 0),
-      action: a.action || "HOLD",
-    }));
+    const rows = state.dashboard.analyses.map((a) => {
+      const liveTick = realtime.prices[a.ticker];
+      return {
+        ticker: a.ticker,
+        price: liveTick?.ltp || Number(a.current_price || a.price || 0),
+        change: liveTick?.change || 0,
+        change_pct: liveTick?.change_pct || 0,
+        ml: Number(a.ml_confidence || 0),
+        sentiment: Number(a.gemini_sentiment_score || 0),
+        action: a.action || "HOLD",
+      };
+    });
     const known = new Set(rows.map((r) => normalizeTicker(r.ticker)));
     const fillers = state.dashboard.watchlist
       .filter((t) => !known.has(normalizeTicker(t)))
-      .map((t) => ({ ticker: t, price: 0, ml: 0, sentiment: 0, action: "HOLD" }));
+      .map((t) => ({ ticker: t, price: 0, change: 0, change_pct: 0, ml: 0, sentiment: 0, action: "HOLD" }));
     return [...rows, ...fillers].sort((a, b) => b.ml - a.ml || a.ticker.localeCompare(b.ticker));
-  }, [state.dashboard.watchlist, state.dashboard.analyses]);
+  }, [state.dashboard.watchlist, state.dashboard.analyses, realtime.prices]);
 
   const value = {
     ...state,

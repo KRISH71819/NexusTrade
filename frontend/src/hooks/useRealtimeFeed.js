@@ -48,6 +48,10 @@ export default function useRealtimeFeed() {
         setIsConnected(true);
         reconnectAttempts.current = 0;
 
+        // Fix 4: Request immediate price snapshot so the cache is populated
+        // before the first Dhan tick arrives — eliminates the "Rs 0" flash on load.
+        ws.send(JSON.stringify({ type: "get_prices" }));
+
         // Start ping/pong keepalive
         pingInterval.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
