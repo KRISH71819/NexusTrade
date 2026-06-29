@@ -1,6 +1,7 @@
 import { useEffect, useRef, useMemo } from "react";
 import {
   AlertTriangle,
+  BarChart3,
   Globe,
   Newspaper,
 } from "lucide-react";
@@ -176,7 +177,9 @@ export default function NewsPage() {
           <div className="detail-panel" style={{ marginTop: "16px" }}>
             <div className="panel-title-row compact">
               <div>
-                <h2>📊 Per-Ticker News Scores ({displayTickerNews.length})</h2>
+                <h2>
+                  <BarChart3 size={16} />
+                  Per-Ticker News Scores ({displayTickerNews.length})</h2>
                 <span>Sentiment scores computed from news analysis</span>
               </div>
             </div>

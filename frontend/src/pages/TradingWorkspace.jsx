@@ -5,6 +5,7 @@ import RightPanel from '../components/RightPanel';
 import InteractiveChart from '../components/InteractiveChart';
 import BottomPanel from '../components/BottomPanel';
 import ActionPill from '../components/ActionPill';
+import MobileNav from '../components/MobileNav';
 import { useApp } from '../context/AppContext';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { money } from '../format';
@@ -116,7 +117,7 @@ export default function TradingWorkspace() {
                                     fontWeight: 700,
                                     fontFamily: 'JetBrains Mono, monospace',
                                     color: row.change_pct >= 0 ? 'var(--green)' : 'var(--red)',
-                                    background: row.change_pct >= 0 ? 'rgba(8,153,129,0.12)' : 'rgba(242,54,69,0.12)',
+                                    background: row.change_pct >= 0 ? 'var(--green-soft)' : 'var(--red-soft)',
                                     padding: '1px 5px',
                                     borderRadius: '4px',
                                   }}
@@ -179,6 +180,9 @@ export default function TradingWorkspace() {
           </>
         )}
       </div>
+
+      {/* Mobile Bottom Navigation (visible only ≤768px via CSS) */}
+      <MobileNav />
     </div>
   );
 }

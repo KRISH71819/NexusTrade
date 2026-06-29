@@ -104,22 +104,22 @@ export default function DashboardPage() {
         fontFamily: "Inter, sans-serif",
       },
       grid: {
-        vertLines: { color: "rgba(42, 46, 57, 0.5)" },
-        horzLines: { color: "rgba(42, 46, 57, 0.5)" },
+        vertLines: { color: "rgba(39, 39, 42, 0.5)" },
+        horzLines: { color: "rgba(39, 39, 42, 0.5)" },
       },
-      rightPriceScale: { borderColor: "#2a2e39" },
-      timeScale: { borderColor: "#2a2e39", timeVisible: true },
+      rightPriceScale: { borderColor: "#27272a" },
+      timeScale: { borderColor: "#27272a", timeVisible: true },
       crosshair: {
-        vertLine: { color: "rgba(120, 123, 134, 0.4)", labelBackgroundColor: "#2a2e39" },
-        horzLine: { color: "rgba(120, 123, 134, 0.4)", labelBackgroundColor: "#2a2e39" },
+        vertLine: { color: "rgba(161, 161, 170, 0.4)", labelBackgroundColor: "#27272a" },
+        horzLine: { color: "rgba(161, 161, 170, 0.4)", labelBackgroundColor: "#27272a" },
       },
       localization: { priceFormatter: (p) => compactMoney(p) },
     });
 
     const areaSeries = chart.addAreaSeries({
-      topColor: "rgba(8, 153, 129, 0.2)",
-      bottomColor: "rgba(8, 153, 129, 0.01)",
-      lineColor: "var(--green)",
+      topColor: "rgba(34, 197, 94, 0.2)",
+      bottomColor: "rgba(34, 197, 94, 0.01)",
+      lineColor: "#22c55e",
       lineWidth: 2,
     });
 

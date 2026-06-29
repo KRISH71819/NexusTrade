@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Search, Settings, Maximize, User, LayoutGrid, Activity, RefreshCw, CandlestickChart, LayoutDashboard } from 'lucide-react';
+import { Search, SlidersHorizontal, Maximize, Briefcase, ClipboardList, Activity, RefreshCw, CandlestickChart, LayoutDashboard } from 'lucide-react';
 
 export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAnalysis, onRefreshMarket, isBusy, timeframe, onTimeframeChange, view = 'chart', onViewChange }) {
   const location = useLocation();
@@ -112,7 +112,7 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
           title="Trade History" 
           style={{ display: 'grid', placeItems: 'center', color: 'inherit' }}
         >
-          <LayoutGrid size={18} />
+          <ClipboardList size={18} />
         </Link>
         <Link 
           to="/trading" 
@@ -120,7 +120,7 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
           title="Controls & Settings" 
           style={{ display: 'grid', placeItems: 'center', color: 'inherit' }}
         >
-          <Settings size={18} />
+          <SlidersHorizontal size={18} />
         </Link>
         <button className="top-btn" title="Fullscreen" onClick={() => {
           if (!document.fullscreenElement) {
@@ -138,7 +138,7 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
           title="Portfolio" 
           style={{ display: 'grid', placeItems: 'center', color: 'inherit' }}
         >
-          <User size={18} />
+          <Briefcase size={18} />
         </Link>
       </div>
     </div>

@@ -1,12 +1,12 @@
 import { useState, useEffect } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
-  Activity,
-  History,
+  CandlestickChart,
+  ClipboardList,
   LayoutDashboard,
   Newspaper,
-  Settings,
-  Wallet,
+  SlidersHorizontal,
+  Briefcase,
   X,
   Radio,
 } from "lucide-react";
@@ -15,11 +15,11 @@ import { api } from "../api";
 
 const navItems = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/analysis", icon: Activity, label: "Chart" },
-  { to: "/portfolio", icon: Wallet, label: "Portfolio" },
+  { to: "/analysis", icon: CandlestickChart, label: "Chart" },
+  { to: "/portfolio", icon: Briefcase, label: "Portfolio" },
   { to: "/news", icon: Newspaper, label: "News" },
-  { to: "/trades", icon: History, label: "History" },
-  { to: "/trading", icon: Settings, label: "Controls" },
+  { to: "/trades", icon: ClipboardList, label: "History" },
+  { to: "/trading", icon: SlidersHorizontal, label: "Controls" },
 ];
 
 export default function Sidebar({ isOpen, onClose }) {

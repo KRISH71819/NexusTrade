@@ -66,20 +66,20 @@ export default function InteractiveChart({ analysis, bars, indicators, ticker, t
         fontFamily: "Inter, Segoe UI, sans-serif",
       },
       grid: {
-        vertLines: { color: "rgba(42, 46, 57, 0.75)" },
-        horzLines: { color: "rgba(42, 46, 57, 0.75)" },
+        vertLines: { color: "rgba(39, 39, 42, 0.75)" },
+        horzLines: { color: "rgba(39, 39, 42, 0.75)" },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: "rgba(120, 123, 134, 0.6)", labelBackgroundColor: "#2a2e39" },
-        horzLine: { color: "rgba(120, 123, 134, 0.6)", labelBackgroundColor: "#2a2e39" },
+        vertLine: { color: "rgba(161, 161, 170, 0.4)", labelBackgroundColor: "#27272a" },
+        horzLine: { color: "rgba(161, 161, 170, 0.4)", labelBackgroundColor: "#27272a" },
       },
       rightPriceScale: {
-        borderColor: "#2a2e39",
+        borderColor: "#27272a",
         scaleMargins: { top: 0.08, bottom: 0.24 },
       },
       timeScale: {
-        borderColor: "#2a2e39",
+        borderColor: "#27272a",
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 8,
@@ -103,12 +103,12 @@ export default function InteractiveChart({ analysis, bars, indicators, ticker, t
     });
 
     const candleSeries = chart.addCandlestickSeries({
-      upColor: "#089981",
-      downColor: "#f23645",
-      borderUpColor: "#089981",
-      borderDownColor: "#f23645",
-      wickUpColor: "#089981",
-      wickDownColor: "#f23645",
+      upColor: "#22c55e",
+      downColor: "#ef4444",
+      borderUpColor: "#22c55e",
+      borderDownColor: "#ef4444",
+      wickUpColor: "#22c55e",
+      wickDownColor: "#ef4444",
       priceFormat: { type: "price", precision: 2, minMove: 0.01 },
     });
     const volumeSeries = chart.addHistogramSeries({
@@ -188,17 +188,17 @@ export default function InteractiveChart({ analysis, bars, indicators, ticker, t
         fontSize: 10,
       },
       grid: {
-        vertLines: { color: "rgba(42, 46, 57, 0.5)" },
-        horzLines: { color: "rgba(42, 46, 57, 0.5)" },
+        vertLines: { color: "rgba(39, 39, 42, 0.5)" },
+        horzLines: { color: "rgba(39, 39, 42, 0.5)" },
       },
       rightPriceScale: {
-        borderColor: "#2a2e39",
+        borderColor: "#27272a",
         scaleMargins: { top: 0.05, bottom: 0.05 },
       },
       timeScale: { visible: false },
       crosshair: {
         vertLine: { visible: false },
-        horzLine: { color: "rgba(120, 123, 134, 0.5)", labelBackgroundColor: "#2a2e39" },
+        horzLine: { color: "rgba(161, 161, 170, 0.4)", labelBackgroundColor: "#27272a" },
       },
       handleScroll: false,
       handleScale: false,
@@ -551,7 +551,7 @@ function buildMarkers(trades, analysis) {
       return {
         time,
         position: isBuy ? "belowBar" : "aboveBar",
-        color: isBuy ? "#089981" : "#f23645",
+        color: isBuy ? "#22c55e" : "#ef4444",
         shape: isBuy ? "arrowUp" : "arrowDown",
         text: `${trade.action} ${trade.quantity || ""}`.trim(),
       };
@@ -563,7 +563,7 @@ function buildMarkers(trades, analysis) {
     tradeMarkers.push({
       time: analysisTime,
       position: analysis.action === "BUY" ? "belowBar" : "aboveBar",
-      color: analysis.action === "BUY" ? "#089981" : "#f23645",
+      color: analysis.action === "BUY" ? "#22c55e" : "#ef4444",
       shape: analysis.action === "BUY" ? "arrowUp" : "arrowDown",
       text: `AI ${analysis.action}`,
     });
