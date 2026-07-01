@@ -1,9 +1,16 @@
 import asyncio
+import os
 from pymongo import AsyncMongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 async def main():
-    c = AsyncMongoClient('REDACTED_USE_ENV_VAR')
-    db = c['paper_trader']
+    uri = os.getenv('MONGODB_URI', '')
+    if not uri:
+        raise RuntimeError("MONGODB_URI not set in .env")
+    c = AsyncMongoClient(uri)
+    db = c[os.getenv('MONGODB_DB_NAME', 'paper_trader')]
     count = await db['analysis_log'].count_documents({})
     print(f'analysis_log has {count} docs')
     if count > 0:
