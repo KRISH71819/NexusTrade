@@ -42,17 +42,17 @@ class Settings(BaseSettings):
     run_analysis_on_startup: bool = True
 
     # ── Risk Management ──────────────────────────────────────────────────
-    stop_loss_pct: float = 0.05          # sell if position drops 5% (tightened from 7%)
+    stop_loss_pct: float = 0.07          # sell if position drops 7% — midcaps need breathing room (was 5%: normal volatility triggered exits)
     trailing_stop_activation_pct: float = 0.15  # activate trailing after 15% gain
     trailing_stop_distance_pct: float = 0.10    # trailing stop at 10% from peak (after activation)
-    trailing_stop_strict_pct: float = 0.06       # ALWAYS-ON: sell if price drops 6% from peak (tightened from 8%)
+    trailing_stop_strict_pct: float = 0.08       # ALWAYS-ON: sell if price drops 8% from peak — give winners room to oscillate (was 6%: killed positions after Tier-1 profit take)
     max_drawdown_pct: float = 0.15       # halt buying if portfolio down 15%
     max_sector_stocks: int = 3           # max holdings per sector
 
     # ── Underperformer Detection ─────────────────────────────────────────
-    underperformer_days: int = 10              # check performance over N days (relaxed from 7 — midcaps need time)
+    underperformer_days: int = 15              # check performance over 15 days — midcaps consolidate 10-14 days routinely (was 10)
     underperformer_min_loss_pct: float = 0.05  # flag if losing > 5% over N days
-    underperformer_stagnant_pct: float = 0.02  # flag if moved < 2% in N days (relaxed from 1% — consolidation is normal)
+    underperformer_stagnant_pct: float = 0.03  # flag if moved < 3% in 15 days — 2% was too tight, killed consolidating stocks (was 0.02)
     profit_take_partial_pct: float = 0.25      # sell 25% of position when taking profit
     profit_take_threshold_pct: float = 0.20    # take partial profit at 20%+ gain
 
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # ── Market Regime Filter ────────────────────────────────────────────
     market_regime_index: str = "^NSEI"            # NIFTY 50 index symbol
     market_regime_sma_period: int = 50            # 50-day SMA for bull/bear regime
-    bearish_trailing_stop_pct: float = 0.04       # tighter 4% trailing in bear markets
+    bearish_trailing_stop_pct: float = 0.05       # 5% trailing in bear markets — 4% triggered on normal dips (was 0.04)
     cautious_trailing_stop_pct: float = 0.07      # 7% trailing in CAUTIOUS regime (wider to absorb midcap volatility)
     regime_cautious_threshold_pct: float = -3.0   # gap > -3% from SMA50 → CAUTIOUS (not full BEARISH)
     cautious_buy_score_threshold: float = 0.68    # higher bar for buying in CAUTIOUS regime (lowered from 0.75 — 14% pass rate vs 8%)
@@ -73,9 +73,9 @@ class Settings(BaseSettings):
     atr_stop_multiplier: float = 1.5              # stop-loss at 1.5× ATR below entry
 
     # ── Scale-Out Profit Taking (two-tier, replaces old single tier) ─────
-    profit_take_tier1_pct: float = 0.08           # +8% gain → sell 33%
+    profit_take_tier1_pct: float = 0.12           # +12% gain → sell 33% — let winners run further (was 8%: too early for midcaps)
     profit_take_tier1_sell_pct: float = 0.33      # fraction to sell at tier 1
-    profit_take_tier2_pct: float = 0.15           # +15% gain → sell another 33%
+    profit_take_tier2_pct: float = 0.20           # +20% gain → sell another 33% — capture more of big moves (was 15%)
     profit_take_tier2_sell_pct: float = 0.33      # fraction to sell at tier 2
 
     # ── Sector Concentration (value-based cap) ───────────────────────────
@@ -104,8 +104,8 @@ class Settings(BaseSettings):
     min_cash_reserve_pct: float = 0.05         # tiny 5% emergency buffer
 
     # ── Batch Decision Thresholds ────────────────────────────────────────
-    score_strong_hold: float = 0.48            # score >= this → keep full position (lowered: typical HOLD stocks score 0.47-0.55)
-    score_weak_hold: float = 0.35              # score between weak and strong → partial sell (only truly weak stocks)
+    score_strong_hold: float = 0.40            # score >= this → keep full position — most held stocks score 0.47-0.55, now safely in KEEP zone (was 0.48: caused cascading partial sells)
+    score_weak_hold: float = 0.28              # score between weak and strong → partial sell (was 0.35: only truly collapsing stocks should trigger full sell)
     # score < weak_hold → full sell (free capital for better stocks)
 
     # ── Max Buys Per Cycle (prevents deploying all cash at once) ─────────

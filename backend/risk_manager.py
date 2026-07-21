@@ -445,7 +445,7 @@ def detect_underperformers(
         # ── Check 2: STAGNANT (dead money) ───────────────────────────────
         # Stock hasn't moved — capital is locked doing nothing
         if (abs(recent_change_pct) < settings.underperformer_stagnant_pct
-                and pnl_pct < 0.02):  # only flag if not already profitable
+                and pnl_pct < -0.01):  # only flag if actually losing money (was 0.02 — wrongly sold winners like EICHERMOT +1.7%, SUNPHARMA +1.5%)
             sell_signals.append({
                 "ticker": ticker,
                 "reason": (

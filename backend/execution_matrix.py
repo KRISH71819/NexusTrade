@@ -115,11 +115,21 @@ def decide_action(
     cautious_blocked = False
     if not has_position:
         if market_regime == "BEARISH":
-            regime_blocked = True
-            logger.info(
-                f"REGIME GATE: Market is BEARISH (NIFTY far below SMA50) → blocking new BUY. "
-                f"Score={final_score:.2f} would have qualified otherwise."
-            )
+            # Instead of blocking all buys, require a very high score to catch recovery bounces
+            # with limited risk. Only truly exceptional signals get through.
+            bearish_score_threshold = 0.75
+            if final_score < bearish_score_threshold:
+                regime_blocked = True
+                logger.info(
+                    f"REGIME GATE: Market is BEARISH (NIFTY far below SMA50) → score {final_score:.2f} "
+                    f"below bearish threshold {bearish_score_threshold}. Blocking BUY. "
+                    f"Only very strong signals (≥{bearish_score_threshold}) allowed in bear markets."
+                )
+            else:
+                logger.info(
+                    f"REGIME GATE: Market is BEARISH but score {final_score:.2f} "
+                    f">= {bearish_score_threshold} → allowing BUY (exceptional signal)."
+                )
         elif market_regime == "CAUTIOUS":
             # Allow buying but require a higher score threshold
             if final_score < settings.cautious_buy_score_threshold:
@@ -237,7 +247,7 @@ def build_action_reason(
     else:
         blocked_reason = ""
         if market_regime == "BEARISH":
-            blocked_reason = " BEARISH REGIME: new buys blocked."
+            blocked_reason = " BEARISH REGIME: score ≥0.75 required for buys (reduced position sizes)."
         elif market_regime == "CAUTIOUS":
             blocked_reason = f" CAUTIOUS REGIME: higher score ({settings.cautious_buy_score_threshold}) needed for buys."
         if volume_ratio < settings.min_volume_ratio:

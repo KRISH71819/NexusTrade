@@ -569,24 +569,24 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
     # Without this, if 5 stocks all score 0.47-0.54, ALL get 50% sold
     # every cycle — compounding into total wipeout within 2 days.
     # Limit to the 2 weakest per cycle; the rest wait for next cycle.
-    if len(partial_sells) > 2:
+    if len(partial_sells) > 1:
         partial_sells.sort(key=lambda r: r["final_score"])  # weakest first
-        throttled_scores = ", ".join(f"{r['final_score']:.2f}" for r in partial_sells[:2])
+        throttled_scores = ", ".join(f"{r['final_score']:.2f}" for r in partial_sells[:1])
         logger.info(
             f"  PARTIAL SELL THROTTLE: {len(partial_sells)} candidates, "
-            f"limiting to 2 weakest (scores: {throttled_scores})"
+            f"limiting to 1 weakest (scores: {throttled_scores})"  # was 2 — caused cascade liquidation
         )
-        partial_sells = partial_sells[:2]
+        partial_sells = partial_sells[:1]  # only 1 partial sell per cycle (was 2)
 
     for r in partial_sells:
         ticker = r["ticker"]
         analysis = r["analysis"]
         price = r["price"]
 
-        # Find holding to calculate 50% sell
+        # Find holding to calculate 25% sell (was 50% — cascaded into total wipeout)
         holding = next((h for h in holdings if h["ticker"] == ticker), None)
         if holding and holding.get("quantity", 0) > 1:
-            sell_qty = max(1, holding["quantity"] // 2)
+            sell_qty = max(1, holding["quantity"] // 4)  # sell 25% not 50% (slower bleed)
             trade = await execute_sell_for_mode(ticker, price, analysis, mode=active_mode, quantity=sell_qty)
             if "error" not in trade:
                 asyncio.create_task(send_trade_alert(trade))
