@@ -1,7 +1,41 @@
 implementation_plan.md
+IMPLEMENTATION_SPEC.md
+MASTER_IMPROVEMENT_PLAN.md
 .env
 __pycache__/
 *.pyc
 .venv/
 venv/
 .DS_Store
+
+# Zip / archive files (don't commit generated zips)
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+*.rar
+
+# PDF documents (large binary files — link externally)
+*.pdf
+
+# Log files
+*.log
+logs.txt
+
+# Kilo AI plan files
+.kilo/
+
+# pytest / test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+*.egg-info/
+dist/
+build/
+
+# Node modules (frontend)
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/.env.local

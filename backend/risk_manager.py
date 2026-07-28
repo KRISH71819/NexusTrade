@@ -222,30 +222,47 @@ def check_stop_losses(
         if not current_price or not avg_price or quantity <= 0:
             continue
 
-        # Check basic stop-loss
-        stop_loss_price = avg_price * (1 - settings.stop_loss_pct)
+        # ── Batch 2.2: ATR-based stop with 7% hard backstop ─────────────────
+        # If atr_at_entry was recorded at buy time, compute the ATR stop
+        # (1.5× ATR below entry). The effective stop is the TIGHTER of the two;
+        # the 7% percentage is the hard floor (can never be wider than 7%).
+        # Legacy holdings without atr_at_entry fall back to percentage stop only.
+        atr_at_entry = holding.get("atr_at_entry")
+        pct_stop = avg_price * (1 - settings.stop_loss_pct)  # 7% floor
+        if atr_at_entry and atr_at_entry > 0:
+            atr_stop = avg_price - settings.atr_stop_multiplier * atr_at_entry
+            # Tighter (higher) of the two wins; 7% is the hard floor
+            stop_loss_price = max(atr_stop, pct_stop)
+        else:
+            stop_loss_price = pct_stop  # legacy fallback
+
         if current_price <= stop_loss_price:
+            used_atr = (atr_at_entry and atr_at_entry > 0)
             sell_signals.append({
                 "ticker": ticker,
                 "reason": (
-                    f"STOP-LOSS: Price Rs.{current_price:.2f} below "
-                    f"Rs.{stop_loss_price:.2f} ({settings.stop_loss_pct:.0%} loss)"
+                    f"STOP-LOSS ({'ATR' if used_atr else 'PCT'}): Price Rs.{current_price:.2f} below "
+                    f"Rs.{stop_loss_price:.2f} "
+                    f"({'ATR stop, 7% floor' if used_atr else f'{settings.stop_loss_pct:.0%} below entry Rs.{avg_price:.2f}'})"
                 ),
                 "price": current_price,
                 "trigger": "stop_loss",
             })
             continue
 
-        # ── BREAK-EVEN LOCK (from profit-taking tier 1) ────────────────────
-        # If we've already taken partial profit at +8%, the stop for the
-        # remaining position is locked at the entry price (break-even).
+        # ── Batch 2.3: Trailing profit lock (replaces entry-price break-even) ─
+        # locked_stop_price ratchets UP on each peak/tier update. It may never
+        # fall below avg_price (so the floor is always at least break-even after
+        # tier 1 fires). When the ATR was recorded, the lock is set to
+        # peak - 1.5×ATR (gives the position breathing room) but never below
+        # entry. Legacy: if no ATR, the old behaviour (lock at entry) is preserved.
         locked_stop = holding.get("locked_stop_price")
         if locked_stop and locked_stop > 0 and current_price <= locked_stop:
             sell_signals.append({
                 "ticker": ticker,
                 "reason": (
-                    f"BREAK-EVEN STOP HIT: Price Rs.{current_price:.2f} hit locked "
-                    f"stop Rs.{locked_stop:.2f} (set after profit-taking tier 1)"
+                    f"PROFIT LOCK HIT: Price Rs.{current_price:.2f} fell to locked "
+                    f"stop Rs.{locked_stop:.2f} (trailing profit lock; entry Rs.{avg_price:.2f})"
                 ),
                 "price": current_price,
                 "trigger": "locked_stop",

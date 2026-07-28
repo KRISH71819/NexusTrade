@@ -50,9 +50,13 @@ def calculate_trade_charges(turnover: float, side: str) -> dict:
     sebi_fee = turnover * settings.sebi_turnover_fee_pct
     stamp_duty = turnover * settings.stamp_duty_buy_pct if side == "BUY" else 0.0
     brokerage = settings.brokerage_per_order
-    gst = (brokerage + exchange_txn) * settings.gst_pct
+    # DP (depository/demat) charge: levied once per scrip on the SELL side only,
+    # not per share. Previously missing → cost model understated ~2×.
+    dp_charge = settings.dp_charge_per_sell if side == "SELL" else 0.0
+    # GST applies to brokerage + exchange charges + DP charge.
+    gst = (brokerage + exchange_txn + dp_charge) * settings.gst_pct
 
-    total = stt + exchange_txn + sebi_fee + stamp_duty + brokerage + gst
+    total = stt + exchange_txn + sebi_fee + stamp_duty + brokerage + dp_charge + gst
 
     return {
         "stt": round(stt, 2),
@@ -60,6 +64,7 @@ def calculate_trade_charges(turnover: float, side: str) -> dict:
         "sebi_fee": round(sebi_fee, 2),
         "stamp_duty": round(stamp_duty, 2),
         "brokerage": round(brokerage, 2),
+        "dp_charge": round(dp_charge, 2),
         "gst": round(gst, 2),
         "total_charges": round(total, 2),
     }
@@ -96,6 +101,113 @@ async def get_portfolio_value() -> float:
     return portfolio["total_value"]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#   DAILY LOSS CIRCUIT BREAKER (Batch 1.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def evaluate_daily_loss_action(
+    daily_pnl_pct: float,
+    halt_pct: float,
+    flatten_pct: float,
+) -> str:
+    """
+    Pure decision helper for the daily loss circuit breaker.
+
+    Returns:
+        "flatten" if the intraday loss has reached the flatten threshold,
+        "halt"    if it has reached the (smaller) halt threshold,
+        "none"    otherwise.
+
+    Both thresholds are given as positive fractions (e.g. 0.035 == 3.5%).
+    Comparison is inclusive so an exact -3.5% triggers flatten.
+    """
+    if daily_pnl_pct <= -abs(flatten_pct):
+        return "flatten"
+    if daily_pnl_pct <= -abs(halt_pct):
+        return "halt"
+    return "none"
+
+
+async def stamp_day_open_if_needed(mode: str = "paper") -> dict:
+    """
+    Ensure the portfolio doc carries the IST day-open value for the current
+    trading day. Re-stamps when the stored date belongs to a previous IST day
+    (or is missing), so a value written the previous IST day is treated as
+    stale — critical on UTC containers (Hugging Face).
+
+    Returns the (possibly refreshed) portfolio doc.
+    """
+    from market_time import ist_today_str, is_stale_day_open
+
+    portfolio = await get_portfolio_for_mode(mode)
+    today = ist_today_str()
+    stored_date = portfolio.get("day_open_date")
+
+    if not is_stale_day_open(stored_date, today) and portfolio.get("day_open_value"):
+        return portfolio
+
+    day_open_value = round(
+        portfolio.get("total_value", portfolio.get("initial_balance", settings.initial_balance)),
+        2,
+    )
+    try:
+        collection = get_portfolio_collection_for_mode(mode)
+        await collection.update_one(
+            {"_id": "main"},
+            {"$set": {"day_open_value": day_open_value, "day_open_date": today}},
+        )
+        portfolio["day_open_value"] = day_open_value
+        portfolio["day_open_date"] = today
+        logger.info(
+            f"[CIRCUIT BREAKER] Stamped day-open value Rs.{day_open_value:,.2f} "
+            f"for IST day {today} (was {stored_date})"
+        )
+    except PyMongoError as e:
+        logger.warning(f"Could not stamp day-open value: {e}")
+
+    return portfolio
+
+
+async def get_daily_pnl_pct(mode: str = "paper") -> float:
+    """
+    Intraday P&L as a fraction of the IST day-open value.
+    Returns 0.0 if the day-open value has not been stamped yet.
+    """
+    portfolio = await get_portfolio_for_mode(mode)
+    day_open = portfolio.get("day_open_value")
+    total = portfolio.get("total_value", 0.0)
+    if not day_open or day_open <= 0:
+        return 0.0
+    return (total / day_open) - 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   SCORE HISTORY (Batch 1.4) — raw distribution data for Batch 2.5 thresholds
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def record_score_snapshot(scores: dict, cycle_id: str) -> None:
+    """
+    Persist one document per analysis cycle capturing the final score of every
+    scored *held* stock. This is the raw data Batch 2.5 uses to set the
+    score-based reduction threshold from measured percentiles.
+
+    Args:
+        scores: {ticker: final_score} for held stocks scored this cycle.
+        cycle_id: an identifier for the cycle (ISO timestamp of cycle start).
+    """
+    if not scores:
+        return
+    try:
+        from database import get_score_history_collection
+        await get_score_history_collection().insert_one({
+            "timestamp": datetime.now(timezone.utc),
+            "cycle_id": cycle_id,
+            "scores": {t: round(float(s), 4) for t, s in scores.items()},
+        })
+    except PyMongoError as e:
+        logger.warning(f"Could not record score snapshot: {e}")
+
+
 async def reset_portfolio(initial_balance: float, clear_logs: bool = True) -> dict:
     """
     Reset the paper-trading account to a clean starting balance.
@@ -105,6 +217,7 @@ async def reset_portfolio(initial_balance: float, clear_logs: bool = True) -> di
         raise ValueError("initial_balance must be greater than 0")
 
     now = datetime.now(timezone.utc)
+    from market_time import ist_today_str
     portfolio_doc = {
         "_id": "main",
         "cash": round(initial_balance, 2),
@@ -115,6 +228,8 @@ async def reset_portfolio(initial_balance: float, clear_logs: bool = True) -> di
         "total_pnl_pct": 0.0,
         "initial_balance": round(initial_balance, 2),
         "peak_value": round(initial_balance, 2),
+        "day_open_value": round(initial_balance, 2),
+        "day_open_date": ist_today_str(),
         "created_at": now,
         "updated_at": now,
     }
@@ -126,6 +241,14 @@ async def reset_portfolio(initial_balance: float, clear_logs: bool = True) -> di
         await get_trades_collection().delete_many({})
         await get_analysis_collection().delete_many({})
         await get_portfolio_history_collection().delete_many({})
+        # Clear Batch 1.4/1.5 instrumentation so the honest-cost + benchmark
+        # baseline starts clean alongside the account reset.
+        try:
+            from database import get_score_history_collection, get_cycle_stats_collection
+            await get_score_history_collection().delete_many({})
+            await get_cycle_stats_collection().delete_many({})
+        except PyMongoError as e:
+            logger.warning(f"Could not clear instrumentation collections on reset: {e}")
 
     await _record_snapshot(initial_balance, 0.0, initial_balance)
     logger.info(f"Portfolio reset with starting balance Rs {initial_balance:,.2f}")
@@ -377,7 +500,13 @@ async def execute_buy(
             "sector": get_sector(ticker),
             "bought_at": datetime.now(timezone.utc),
             "profit_taken_tiers": [],       # tracks which profit tiers have fired
-            "locked_stop_price": None,       # break-even lock after tier 1
+            "locked_stop_price": None,       # trailing profit lock (Batch 2.3)
+            "last_partial_sell_at": None,    # per-ticker partial-sell cooldown (inert until Batch 2.5)
+            "partial_sell_history": [],      # scaffolding for score-reduction audit (Batch 2.5)
+            # Batch 2.1: ATR at the time of entry — used by the ATR stop (Batch 2.2) and
+            # the trailing profit lock (Batch 2.3). Absent for legacy holdings; those fall
+            # back to the 7% percentage stop.
+            "atr_at_entry": round(float(atr), 4) if atr and atr > 0 else None,
         })
 
     # Compute new total value using live price for all holdings
@@ -581,9 +710,10 @@ async def log_hold(ticker: str, analysis: AnalysisResult) -> dict:
     except PyMongoError as e:
         logger.warning(f"Could not log HOLD decision to MongoDB: {e}")
 
+    ml_str = f"{analysis.ml_confidence:.2f}" if analysis.ml_confidence is not None else "N/A"
     logger.info(
         f"HOLD {ticker} — Score: {analysis.final_score:.2f}, "
-        f"ML: {analysis.ml_confidence:.2f}, "
+        f"ML: {ml_str}, "
         f"Gemini: {analysis.gemini_confidence:.2f}"
     )
 

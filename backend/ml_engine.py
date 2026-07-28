@@ -147,15 +147,25 @@ def _create_targets(df: pd.DataFrame) -> pd.DataFrame:
       - target_3: close 3 bars ahead > current close
       - target_5: close 5 bars ahead > current close
       - target_combined: majority vote of all three
+
+    Batch 3.1 fix: NaN > x evaluates to False in pandas, which .astype(int)
+    silently converts to 0 (fake DOWN label) for the last few incomplete bars.
+    Instead, use .where(close.shift(-h).notna()) to preserve NaN for rows where
+    the future bar does not exist yet; the caller's dropna() will then discard
+    those tail rows, keeping only clean labels.
     """
     close = df["close"].astype(float)
     targets = pd.DataFrame(index=df.index)
-    targets["target_1"] = (close.shift(-1) > close).astype(int)
-    targets["target_3"] = (close.shift(-3) > close).astype(int)
-    targets["target_5"] = (close.shift(-5) > close).astype(int)
+    for h, col in [(1, "target_1"), (3, "target_3"), (5, "target_5")]:
+        future = close.shift(-h)
+        # .where(cond) keeps value where cond is True, else sets NaN.
+        # This propagates NaN for tail rows rather than producing fake 0s.
+        targets[col] = (future > close).where(future.notna()).astype("Int64")
     targets["target_combined"] = (
-        (targets["target_1"] + targets["target_3"] + targets["target_5"]) >= 2
-    ).astype(int)
+        (targets["target_1"].fillna(0) + targets["target_3"].fillna(0) + targets["target_5"].fillna(0)) >= 2
+    ).where(
+        targets["target_1"].notna() & targets["target_3"].notna() & targets["target_5"].notna()
+    ).astype("Int64")
     return targets
 
 
@@ -184,9 +194,9 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
                 f"need {MIN_BARS_FOR_TRAINING}). Returning neutral."
             )
             return {
-                "ml_confidence": 0.50,
+                "ml_confidence": None,
                 "features_used": indicators if indicators else {},
-                "model_info": {"status": "insufficient_data"},
+                "model_info": {"status": "FAILED", "reason": "insufficient_data"},
             }
 
         df = pd.DataFrame(doc["bars"])
@@ -200,9 +210,9 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
 
         if len(combined) < MIN_BARS_FOR_TRAINING:
             return {
-                "ml_confidence": 0.50,
+                "ml_confidence": None,
                 "features_used": indicators if indicators else {},
-                "model_info": {"status": "insufficient_clean_data"},
+                "model_info": {"status": "FAILED", "reason": "insufficient_clean_data"},
             }
 
         # ── Walk-forward split ───────────────────────────────────────────
@@ -213,9 +223,9 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
 
         if train_end < 30:
             return {
-                "ml_confidence": 0.50,
+                "ml_confidence": None,
                 "features_used": indicators if indicators else {},
-                "model_info": {"status": "insufficient_training_data"},
+                "model_info": {"status": "FAILED", "reason": "insufficient_training_data"},
             }
 
         feature_cols = [c for c in FEATURE_COLUMNS if c in combined.columns]
@@ -374,7 +384,7 @@ async def predict_trend(ticker: str, indicators: dict) -> dict:
     except Exception as e:
         logger.error(f"ML engine error for {ticker}: {e}", exc_info=True)
         return {
-            "ml_confidence": 0.50,
+            "ml_confidence": None,
             "features_used": indicators if indicators else {},
-            "model_info": {"status": "error", "error": str(e)},
+            "model_info": {"status": "FAILED", "reason": "error", "error": str(e)},
         }

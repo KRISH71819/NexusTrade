@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     run_analysis_on_startup: bool = True
 
     # ── Risk Management ──────────────────────────────────────────────────
+    # Daily loss circuit breaker (Batch 1.1) — bounds the worst intraday day.
+    # Measured against the IST day-open portfolio value, not the peak.
+    daily_loss_halt_pct: float = 0.02       # skip all new BUYs this cycle if intraday loss >= 2%
+    daily_loss_flatten_pct: float = 0.035   # also engage kill switch (manual clear) if intraday loss >= 3.5%
     stop_loss_pct: float = 0.07          # sell if position drops 7% — midcaps need breathing room (was 5%: normal volatility triggered exits)
     trailing_stop_activation_pct: float = 0.15  # activate trailing after 15% gain
     trailing_stop_distance_pct: float = 0.10    # trailing stop at 10% from peak (after activation)
@@ -82,7 +86,7 @@ class Settings(BaseSettings):
     max_sector_value_pct: float = 0.25            # 25% of portfolio value per sector
 
     # ── Slippage & Friction Simulation ───────────────────────────────────
-    slippage_bps: float = 15.0                    # 15 basis points (0.15%) market impact per trade
+    slippage_bps: float = 40.0                    # 40 basis points (0.40%) market impact — realistic for NSE midcaps (was 15: optimistic). Keep configurable for 15/40/75 stress.
 
     # ── Indian Market Trading Charges (realistic simulation) ─────────────
     # These are deducted from cash on every trade to simulate real costs.
@@ -93,7 +97,8 @@ class Settings(BaseSettings):
     sebi_turnover_fee_pct: float = 0.000001       # SEBI fee 0.0001%
     stamp_duty_buy_pct: float = 0.00015           # Stamp duty 0.015% on BUY side only
     brokerage_per_order: float = 20.0             # Flat brokerage per order (discount broker)
-    gst_pct: float = 0.18                         # 18% GST on (brokerage + exchange charges)
+    dp_charge_per_sell: float = 15.0              # Depository (DP/demat) charge, applied once per scrip on SELL side (not per share)
+    gst_pct: float = 0.18                         # 18% GST on (brokerage + exchange charges + DP charge)
 
     # ── Volume Confirmation Gate ─────────────────────────────────────────
     min_volume_ratio: float = 0.8                  # require volume ≥ 0.8× 20-day avg (relaxed for hourly data)
@@ -104,9 +109,18 @@ class Settings(BaseSettings):
     min_cash_reserve_pct: float = 0.05         # tiny 5% emergency buffer
 
     # ── Batch Decision Thresholds ────────────────────────────────────────
-    score_strong_hold: float = 0.40            # score >= this → keep full position — most held stocks score 0.47-0.55, now safely in KEEP zone (was 0.48: caused cascading partial sells)
-    score_weak_hold: float = 0.28              # score between weak and strong → partial sell (was 0.35: only truly collapsing stocks should trigger full sell)
+    # DEPRECATED (Batch 1.4): score-based selling of held stocks is OFF. These
+    # thresholds were effectively dead (a neutral held stock scores ~0.545, far
+    # above both), producing churn without protection. Kept (not deleted) so the
+    # revert is trivial and so Batch 2.5 can re-activate a data-driven rule.
+    score_strong_hold: float = 0.40            # [deprecated/inert] was: keep full position at/above this
+    score_weak_hold: float = 0.28              # [deprecated/inert] was: full sell below this
     # score < weak_hold → full sell (free capital for better stocks)
+
+    # ── Partial-Sell Cooldown (per-ticker; inert until Batch 2.5) ────────
+    # Added now so activating score-based reduction later carries no schema
+    # migration. Prevents the historical 12-sell cascade from reappearing.
+    partial_sell_cooldown_hours: float = 72.0
 
     # ── Max Buys Per Cycle (prevents deploying all cash at once) ─────────
     max_buys_per_cycle: int = 3                # max 3 new buys per analysis cycle

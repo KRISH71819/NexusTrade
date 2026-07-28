@@ -10,6 +10,16 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
+
+def _fmt_pct(value, missing: str = "N/A") -> str:
+    """Format a 0-1 confidence as a percent, tolerating None (failure state)."""
+    if value is None:
+        return missing
+    try:
+        return f"{value:.0%}"
+    except (TypeError, ValueError):
+        return missing
+
 # ── Startup validation ──────────────────────────────────────────────────────
 if settings.telegram_bot_token and settings.telegram_chat_id:
     logger.info(
@@ -22,6 +32,38 @@ else:
         f"bot_token={'SET' if settings.telegram_bot_token else 'MISSING'}, "
         f"chat_id={'SET' if settings.telegram_chat_id else 'MISSING'}"
     )
+
+
+async def send_message(text: str, parse_mode: str | None = "Markdown") -> bool:
+    """
+    Send a plain text/markdown message to the configured Telegram chat.
+
+    Used for system alerts (circuit breaker, LLM/ML failure storms, the daily
+    one-page report) that are not per-trade notifications.
+    """
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        logger.debug("Telegram not configured — skipping message")
+        return False
+
+    url = TELEGRAM_API.format(token=settings.telegram_bot_token)
+    payload = {
+        "chat_id": settings.telegram_chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code == 200:
+            return True
+        logger.error(f"Telegram message error {response.status_code}: {response.text[:200]}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to send Telegram message: {type(e).__name__}: {e}")
+        return False
 
 
 async def send_trade_alert(trade: dict) -> bool:
@@ -46,7 +88,7 @@ async def send_trade_alert(trade: dict) -> bool:
             f"📦 Qty: {trade['quantity']}\n"
             f"💵 Total: Rs.{trade['total_value']:,.2f}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 ML Confidence: {trade['ml_confidence']:.0%}\n"
+            f"🤖 ML Confidence: {_fmt_pct(trade.get('ml_confidence'))}\n"
             f"📰 Sentiment: {trade['gemini_sentiment_score']:+.2f}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 [View Dashboard]({settings.dashboard_url})\n"

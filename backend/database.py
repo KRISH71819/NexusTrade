@@ -93,6 +93,20 @@ def get_portfolio_history_collection():
     return get_db()["portfolio_history"]
 
 
+def get_score_history_collection():
+    """Per-cycle score snapshots for held stocks (Batch 1.4).
+
+    Raw data used by Batch 2.5 to set score-reduction thresholds from measured
+    percentiles instead of guesses.
+    """
+    return get_db()["score_history"]
+
+
+def get_cycle_stats_collection():
+    """Per-cycle operational stats (failures, action counts) for the daily report (Batch 1.5)."""
+    return get_db()["cycle_stats"]
+
+
 # ── Collections (Live Trading — complete isolation) ──────────────────────────
 
 def get_live_portfolio_collection():
@@ -149,6 +163,8 @@ async def _ensure_indexes():
     await db["analysis_log"].create_index([("timestamp", -1)])
     await db["market_data"].create_index("ticker", unique=True)
     await db["portfolio_history"].create_index([("timestamp", -1)])
+    await db["score_history"].create_index([("timestamp", -1)])
+    await db["cycle_stats"].create_index([("timestamp", -1)])
 
     # Live trading indexes (same structure, separate collections)
     await db["live_trades"].create_index([("ticker", 1), ("timestamp", -1)])

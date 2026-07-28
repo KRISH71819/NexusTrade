@@ -52,15 +52,21 @@ from ledger import (
     get_portfolio_for_mode,
     has_position_for_mode,
     sync_live_portfolio,
+    stamp_day_open_if_needed,
+    get_daily_pnl_pct,
+    evaluate_daily_loss_action,
+    record_score_snapshot,
 )
 from models import AnalysisResult, TradeAction
-from telegram_bot import send_trade_alert
+from telegram_bot import send_trade_alert, send_message
+from reporting import generate_daily_report
 
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 _analysis_running = False  # prevent concurrent runs
 _cancel_requested = False  # allows manual trigger to cancel a stuck cycle
+_current_cycle_id: str | None = None  # ISO timestamp of the running cycle (for score snapshots)
 
 # With Gemma 4 31B (1,500 RPD / 15 RPM), all screened candidates
 # get full LLM analysis — no need for a tier limit.
@@ -77,7 +83,7 @@ async def run_analysis_cycle(force: bool = False):
     With 1,500 RPD and 15 RPM, every screened candidate + held stock
     gets full LLM structured analysis for maximum stock selection quality.
     """
-    global _analysis_running, _cancel_requested
+    global _analysis_running, _cancel_requested, _current_cycle_id
 
     if _analysis_running:
         if force:
@@ -98,6 +104,7 @@ async def run_analysis_cycle(force: bool = False):
     _analysis_running = True
     _cancel_requested = False
     cycle_start = datetime.now(timezone.utc)
+    _current_cycle_id = cycle_start.isoformat()
     results = []
 
     try:
@@ -117,6 +124,48 @@ async def run_analysis_cycle(force: bool = False):
         portfolio = await get_portfolio_for_mode(active_mode)
         holdings = portfolio.get("holdings", [])
         held_tickers = [h["ticker"] for h in holdings if h.get("quantity", 0) > 0]
+
+        # ── Step 1.1: Daily loss circuit breaker (Batch 1.1) ─────────────
+        # Stamp the IST day-open value once per trading day, then measure
+        # intraday P&L against it. Sells always continue; only new BUYs are
+        # bounded. Flatten additionally engages the (manual-clear) kill switch.
+        buys_halted = False
+        if active_mode == "paper":
+            await stamp_day_open_if_needed(active_mode)
+            daily_pnl = await get_daily_pnl_pct(active_mode)
+            loss_action = evaluate_daily_loss_action(
+                daily_pnl,
+                settings.daily_loss_halt_pct,
+                settings.daily_loss_flatten_pct,
+            )
+            if loss_action == "flatten":
+                buys_halted = True
+                logger.error(
+                    f"DAILY LOSS FLATTEN: intraday P&L {daily_pnl:+.2%} <= "
+                    f"-{settings.daily_loss_flatten_pct:.2%}. Halting BUYs and engaging "
+                    f"kill switch (manual clear required). Sells still allowed."
+                )
+                try:
+                    from kill_switch import set_kill_switch
+                    await set_kill_switch(True, source="scheduler")
+                except Exception as e:
+                    logger.error(f"Could not engage kill switch on flatten: {e}")
+                asyncio.create_task(send_message(
+                    f"🚨 *DAILY LOSS FLATTEN*\nIntraday P&L {daily_pnl:+.2%} breached "
+                    f"-{settings.daily_loss_flatten_pct:.1%}.\nKill switch ON (manual clear). "
+                    f"New buys halted; sells continue."
+                ))
+            elif loss_action == "halt":
+                buys_halted = True
+                logger.warning(
+                    f"DAILY LOSS HALT: intraday P&L {daily_pnl:+.2%} <= "
+                    f"-{settings.daily_loss_halt_pct:.2%}. Skipping all new BUYs this cycle. "
+                    f"Sells still allowed."
+                )
+                asyncio.create_task(send_message(
+                    f"⚠️ *DAILY LOSS HALT*\nIntraday P&L {daily_pnl:+.2%} breached "
+                    f"-{settings.daily_loss_halt_pct:.1%}.\nNew buys skipped this cycle; sells continue."
+                ))
 
         # ── Step 2: Bulk screen watchlist ────────────────────────────────
         watchlist = resolve_watchlist(settings.watchlist)
@@ -191,7 +240,7 @@ async def run_analysis_cycle(force: bool = False):
         # candidates. This replaces the old portfolio rotation logic.
         batch_stats = {"sells": 0, "buys": 0, "partial_sells": 0}
         try:
-            batch_stats = await _execute_batch_decisions(results, market_regime)
+            batch_stats = await _execute_batch_decisions(results, market_regime, buys_halted=buys_halted)
             logger.info(
                 f"BATCH OPTIMIZER: {batch_stats['sells']} full sell(s), "
                 f"{batch_stats['partial_sells']} partial sell(s), "
@@ -223,6 +272,25 @@ async def run_analysis_cycle(force: bool = False):
             action = r.get("action", "ERROR")
             actions[action] = actions.get(action, 0) + 1
 
+        # ── Failure-rate alert (Batch 1.2) ────────────────────────────────
+        # Count tickers skipped specifically because the LLM failed, plus hard
+        # errors. If failures exceed 20% of the cycle, the book is effectively
+        # frozen — alert instead of looking healthy.
+        llm_failures = sum(1 for r in results if r.get("llm_failed"))
+        error_count = actions.get("ERROR", 0)
+        total_tickers = len(results) if results else 0
+        failure_count = llm_failures + error_count
+        if total_tickers > 0 and (failure_count / total_tickers) > 0.20:
+            logger.error(
+                f"HIGH FAILURE RATE: {failure_count}/{total_tickers} tickers failed "
+                f"this cycle ({llm_failures} LLM-failed, {error_count} errored)."
+            )
+            asyncio.create_task(send_message(
+                f"🛑 *HIGH FAILURE RATE*\n{failure_count}/{total_tickers} tickers failed "
+                f"this cycle ({llm_failures} LLM-failed, {error_count} errored).\n"
+                f"The book may be frozen — investigate API health."
+            ))
+
         budget_after = get_daily_budget_status()
         elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
         logger.info(
@@ -230,6 +298,7 @@ async def run_analysis_cycle(force: bool = False):
             f"BUY: {actions['BUY']}, SELL: {actions['SELL']}, "
             f"HOLD: {actions['HOLD']}, SKIP: {actions.get('SKIP', 0)}, "
             f"ERRORS: {actions.get('ERROR', 0)} | "
+            f"LLM failures: {llm_failures} | "
             f"LLM calls this cycle: {len(ordered_tickers) - actions.get('SKIP', 0)} | "
             f"Daily budget: {budget_after['calls_today']}/{budget_after['daily_limit']}"
         )
@@ -240,6 +309,7 @@ async def run_analysis_cycle(force: bool = False):
             "tickers_analyzed": len(ordered_tickers),
             "llm_analyzed": len(ordered_tickers),
             "actions": actions,
+            "llm_failures": llm_failures,
             "elapsed_seconds": round(elapsed, 1),
             "daily_budget": budget_after,
             "results": results,
@@ -304,26 +374,29 @@ async def _analyze_single_ticker(
         ml_result = await predict_trend(ticker, indicators)
     except Exception as e:
         logger.warning(f"ML prediction failed for {ticker}: {e}")
-        ml_result = {"ml_confidence": 0.50, "features_used": {}, "model_info": {"status": "error"}}
+        ml_result = {"ml_confidence": None, "features_used": {}, "model_info": {"status": "FAILED", "reason": "error"}}
 
-    ml_confidence = ml_result["ml_confidence"]
+    # ml_confidence is None when ML FAILED (insufficient data / error). It must
+    # not masquerade as a neutral 0.5 (Batch 1.2). compute_final_score drops the
+    # ML term and renormalizes when it is None.
+    ml_confidence = ml_result.get("ml_confidence")
 
-    # ── GATE: Skip stocks with insufficient ML data ──────────────────
-    # If ML engine couldn't build a reliable model due to missing data,
-    # do NOT waste an LLM call or buy this stock blindly.
+    # ── GATE: Skip stocks with a FAILED ML model ──────────────────────
+    # If the ML engine couldn't build a reliable model (missing data / error),
+    # do NOT waste an LLM call or buy this stock blindly. Held stocks continue
+    # to the LLM so we can still decide SELL/HOLD (protected by stops meanwhile).
     ml_status = ml_result.get("model_info", {}).get("status", "")
-    if ml_status in ("insufficient_data", "insufficient_clean_data", "insufficient_training_data"):
+    if ml_status == "FAILED":
+        ml_reason = ml_result.get("model_info", {}).get("reason", "failed")
         is_holding = await has_position_for_mode(ticker, active_mode)
         if not is_holding:
             logger.warning(
-                f"SKIPPING {ticker} — ML has {ml_status} "
-                f"(not enough bars for reliable prediction). "
-                f"Will NOT call LLM or buy."
+                f"SKIPPING {ticker} — ML FAILED ({ml_reason}). Will NOT call LLM or buy."
             )
             return {
                 "ticker": ticker,
                 "action": "SKIP",
-                "reason": ml_status,
+                "reason": f"ml_{ml_reason}",
                 "price": current_price,
             }
         # If we already HOLD it, continue to LLM so we can decide SELL/HOLD
@@ -353,9 +426,27 @@ async def _analyze_single_ticker(
     except Exception as e:
         logger.warning(f"Gemini analysis failed for {ticker}: {e}")
         gemini_result = {
-            "action": "HOLD", "confidence": 0.5, "position_size_pct": 0.0,
+            "status": "FAILED",
+            "action": "HOLD", "confidence": None, "position_size_pct": 0.0,
             "risk_factors": [], "reasoning": f"Gemini unavailable: {e}",
-            "news_impact_score": 0.0, "crisis_detected": False,
+            "news_impact_score": None, "crisis_detected": False,
+        }
+
+    # ── GATE: LLM FAILED → skip the ticker entirely this cycle (Batch 1.2) ──
+    # A failed LLM read must NOT be scored as a neutral 0.5 (that silently
+    # freezes the book while looking healthy). No score, no buy, no sell.
+    # Held tickers simply stay held, protected by the risk-check stops.
+    if gemini_result.get("status") == "FAILED":
+        logger.warning(
+            f"SKIPPING {ticker} — LLM FAILED (no valid Gemini read this cycle). "
+            f"Held positions remain protected by stop-loss / trailing scans."
+        )
+        return {
+            "ticker": ticker,
+            "action": "SKIP",
+            "reason": "llm_failed",
+            "price": current_price,
+            "llm_failed": True,
         }
 
     gemini_confidence = gemini_result["confidence"]
@@ -369,11 +460,16 @@ async def _analyze_single_ticker(
     # ── 5. Risk Assessment ───────────────────────────────────────────────
     is_holding = await has_position_for_mode(ticker, active_mode)
 
+    # assess_risk needs a numeric ML confidence for position sizing; use a
+    # neutral 0.5 only for that internal calculation when ML FAILED. The score
+    # itself (compute_final_score) still excludes the failed ML term.
+    ml_confidence_for_risk = ml_confidence if ml_confidence is not None else 0.5
+
     risk_assessment = assess_risk(
         ticker=ticker,
         current_price=current_price,
         portfolio=portfolio,
-        ml_confidence=ml_confidence,
+        ml_confidence=ml_confidence_for_risk,
         gemini_confidence=gemini_confidence,
         crisis_detected=crisis_detected,
     )
@@ -439,9 +535,10 @@ async def _analyze_single_ticker(
     # The batch optimizer in _execute_batch_decisions() will rank all stocks
     # and execute sells/buys in optimal order after ALL tickers are scored.
 
+    ml_str = f"{ml_confidence:.2f}" if ml_confidence is not None else "FAILED"
     logger.info(
         f"[SCORED:{action.value}] {ticker} @ Rs{current_price:.2f} | "
-        f"Score: {final_score:.2f} | ML: {ml_confidence:.2f} | "
+        f"Score: {final_score:.2f} | ML: {ml_str} | "
         f"Gemini: {gemini_confidence:.2f} | News: {news_impact_score:+.2f} | "
         f"Crisis: {crisis_detected}"
     )
@@ -451,7 +548,7 @@ async def _analyze_single_ticker(
         "action": action.value,
         "price": current_price,
         "final_score": round(final_score, 3),
-        "ml_confidence": round(ml_confidence, 3),
+        "ml_confidence": round(ml_confidence, 3) if ml_confidence is not None else None,
         "gemini_confidence": round(gemini_confidence, 3),
         "news_impact": round(news_impact_score, 3),
         "crisis": crisis_detected,
@@ -465,7 +562,7 @@ async def _analyze_single_ticker(
 #   BATCH PORTFOLIO OPTIMIZER — Score everything, then trade smart
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BULLISH") -> dict:
+async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BULLISH", buys_halted: bool = False) -> dict:
     """
     Batch Portfolio Optimizer — the brain of the trading system.
 
@@ -500,10 +597,18 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         return {"sells": 0, "buys": 0, "partial_sells": 0}
 
     # ── PHASE 1: CLASSIFY ────────────────────────────────────────────────
-    full_sells = []       # held stocks to fully exit
-    partial_sells = []    # held stocks to reduce exposure
+    # Batch 1.4: score-based selling of held stocks is OFF. The old
+    # score_weak_hold / score_strong_hold thresholds were effectively dead
+    # (a neutral held stock scores ~0.545, above both) and only produced churn.
+    # Held losers remain protected by the run_risk_check stop/trailing/
+    # underperformer scans, so nothing is left unmanaged. We keep ONLY the
+    # crisis full-sell as a real exit here, and record the per-cycle score
+    # distribution so Batch 2.5 can set a data-driven threshold later.
+    full_sells = []       # held stocks to fully exit (crisis only)
+    partial_sells = []    # intentionally left empty in Batch 1.4 (score sells OFF)
     buy_candidates = []   # new stocks to buy
     keeps = []            # held stocks to keep as-is
+    held_score_snapshot = {}  # {ticker: final_score} for held stocks
 
     for r in scored:
         ticker = r["ticker"]
@@ -513,36 +618,38 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
         action_recommended = r.get("action", "HOLD")
 
         if is_held:
+            held_score_snapshot[ticker] = score
             # ── Decide what to do with HELD stocks ────────────────────
-            if crisis or score < settings.score_weak_hold:
-                # Weak stock or crisis → full sell to free capital
+            # Only a real crisis is a score/state-driven full exit here.
+            if crisis:
                 full_sells.append(r)
-                logger.info(
-                    f"  CLASSIFY {ticker}: FULL SELL "
-                    f"(score={score:.2f} < {settings.score_weak_hold}, crisis={crisis})"
-                )
-            elif score < settings.score_strong_hold:
-                # Mediocre stock → partial sell (free some capital, keep upside)
-                partial_sells.append(r)
-                logger.info(
-                    f"  CLASSIFY {ticker}: PARTIAL SELL "
-                    f"(score={score:.2f}, between {settings.score_weak_hold}-{settings.score_strong_hold})"
-                )
+                logger.info(f"  CLASSIFY {ticker}: FULL SELL (crisis detected)")
             else:
-                # Strong stock → keep entire position
+                # Everything else is KEPT. Deteriorating holdings are handled by
+                # run_risk_check (stop-loss / trailing / underperformer), not by
+                # the (deprecated) score thresholds.
                 keeps.append(r)
-                logger.debug(f"  CLASSIFY {ticker}: KEEP (score={score:.2f})")
+                logger.debug(f"  CLASSIFY {ticker}: KEEP (score={score:.2f}, score-sells OFF)")
         else:
             # ── New candidate — only consider if score qualifies for BUY ──
             if action_recommended == "BUY" and score >= 0.60 and not crisis:
                 buy_candidates.append(r)
+
+    # ── Record per-cycle score snapshot for held stocks (Batch 1.4) ──────
+    # Raw data for Batch 2.5 percentile-based thresholds.
+    try:
+        cycle_id = _current_cycle_id or datetime.now(timezone.utc).isoformat()
+        await record_score_snapshot(held_score_snapshot, cycle_id)
+    except Exception as e:
+        logger.warning(f"Could not record score snapshot: {e}")
 
     # Sort buy candidates by score descending (best opportunities first)
     buy_candidates.sort(key=lambda r: r["final_score"], reverse=True)
 
     logger.info(
         f"BATCH OPTIMIZER PLAN: "
-        f"{len(full_sells)} full sell(s), {len(partial_sells)} partial sell(s), "
+        f"{len(full_sells)} full sell(s) [crisis-only], "
+        f"{len(partial_sells)} partial sell(s) [score-sells OFF], "
         f"{len(keeps)} keep(s), {len(buy_candidates)} buy candidate(s)"
     )
 
@@ -559,48 +666,33 @@ async def _execute_batch_decisions(cycle_results: list, market_regime: str = "BU
             asyncio.create_task(send_trade_alert(trade))
             stats["sells"] += 1
             logger.info(
-                f"  BATCH SELL: {ticker} @ Rs.{price:.2f} "
-                f"(score {r['final_score']:.2f} < {settings.score_weak_hold})"
+                f"  BATCH SELL: {ticker} @ Rs.{price:.2f} (crisis full-sell)"
             )
         else:
             logger.warning(f"  BATCH SELL FAILED: {ticker} — {trade.get('error')}")
 
-    # ── THROTTLE partial sells to prevent cascade liquidation ─────────
-    # Without this, if 5 stocks all score 0.47-0.54, ALL get 50% sold
-    # every cycle — compounding into total wipeout within 2 days.
-    # Limit to the 2 weakest per cycle; the rest wait for next cycle.
-    if len(partial_sells) > 1:
-        partial_sells.sort(key=lambda r: r["final_score"])  # weakest first
-        throttled_scores = ", ".join(f"{r['final_score']:.2f}" for r in partial_sells[:1])
-        logger.info(
-            f"  PARTIAL SELL THROTTLE: {len(partial_sells)} candidates, "
-            f"limiting to 1 weakest (scores: {throttled_scores})"  # was 2 — caused cascade liquidation
-        )
-        partial_sells = partial_sells[:1]  # only 1 partial sell per cycle (was 2)
-
-    for r in partial_sells:
-        ticker = r["ticker"]
-        analysis = r["analysis"]
-        price = r["price"]
-
-        # Find holding to calculate 25% sell (was 50% — cascaded into total wipeout)
-        holding = next((h for h in holdings if h["ticker"] == ticker), None)
-        if holding and holding.get("quantity", 0) > 1:
-            sell_qty = max(1, holding["quantity"] // 4)  # sell 25% not 50% (slower bleed)
-            trade = await execute_sell_for_mode(ticker, price, analysis, mode=active_mode, quantity=sell_qty)
-            if "error" not in trade:
-                asyncio.create_task(send_trade_alert(trade))
-                stats["partial_sells"] += 1
-                logger.info(
-                    f"  BATCH PARTIAL SELL: {ticker} — sold {sell_qty}/{holding['quantity']} shares "
-                    f"(score {r['final_score']:.2f}, freeing capital for stronger stocks)"
-                )
-            else:
-                logger.warning(f"  BATCH PARTIAL SELL FAILED: {ticker} — {trade.get('error')}")
+    # ── PARTIAL SELLS: DISABLED in Batch 1.4 (score-based selling is OFF) ──
+    # The score-driven partial-sell path is intentionally inert until Batch 2.5
+    # re-activates it as a data-driven, cooldown-gated arbiter rule. Left here
+    # (empty list) so the revert / re-activation is a localized change.
+    if partial_sells:
+        logger.info(f"  PARTIAL SELLS SKIPPED: score-based selling OFF in Batch 1.4")
+        partial_sells = []
 
     # ── PHASE 3: EXECUTE BUYS (strongest scores first, with SWAP logic) ───
     # Re-fetch portfolio after sells to get updated cash balance
     portfolio = await get_portfolio_for_mode(active_mode)
+
+    # ── DAILY LOSS HALT (Batch 1.1) ──────────────────────────────────────
+    # Paper execute_buy ignores the kill switch, so the halt is enforced here
+    # in the scheduler buy loop: drop all buy candidates. Sells above already ran.
+    if buys_halted and buy_candidates:
+        logger.warning(
+            f"DAILY LOSS HALT active — skipping all {len(buy_candidates)} buy candidate(s) "
+            f"this cycle (sells already executed)."
+        )
+        buy_candidates = []
+
     current_holdings_count = len([
         h for h in portfolio.get("holdings", [])
         if h.get("quantity", 0) > 0
@@ -987,20 +1079,55 @@ async def run_risk_check():
                         update_ops = {
                             "$addToSet": {"holdings.$.profit_taken_tiers": tier}
                         }
-                        # If tier 1 fired, lock stop at entry price
-                        lock_stop = signal.get("lock_stop_at")
-                        if lock_stop:
-                            update_ops["$set"] = {
-                                "holdings.$.locked_stop_price": lock_stop
-                            }
+
+                        # ── Batch 2.3: Trailing profit lock ──────────────────
+                        # Replace the old entry-price break-even lock with a
+                        # peak-trailing ATR lock: new_lock = max(existing_lock,
+                        # peak_price - 1.5*atr_at_entry, avg_price). The lock
+                        # can only ratchet UP (never decreases when peak falls)
+                        # and is always at least avg_price after tier 1 fires.
+                        lock_stop = signal.get("lock_stop_at")  # legacy path
+                        if lock_stop or tier:
+                            # Fetch holding for ATR and peak data
+                            port_now = await get_portfolio_for_mode(active_mode)
+                            holding_now = next(
+                                (h for h in port_now.get("holdings", []) if h["ticker"] == ticker),
+                                None,
+                            )
+                            if holding_now:
+                                atr_e = holding_now.get("atr_at_entry")
+                                peak_p = holding_now.get("peak_price") or holding_now.get("avg_price", 0)
+                                avg_p = holding_now.get("avg_price", 0)
+                                existing_lock = holding_now.get("locked_stop_price") or 0.0
+
+                                if atr_e and atr_e > 0:
+                                    # ATR-based trailing lock (Batch 2.3)
+                                    proposed = peak_p - settings.atr_stop_multiplier * atr_e
+                                    new_lock = round(max(existing_lock, proposed, avg_p), 2)
+                                else:
+                                    # Legacy fallback: lock at entry (break-even)
+                                    new_lock = round(max(existing_lock, avg_p), 2)
+
+                                update_ops["$set"] = {
+                                    "holdings.$.locked_stop_price": new_lock
+                                }
+                                logger.info(
+                                    f"[Batch 2.3] {ticker} profit lock: "
+                                    f"peak={peak_p:.2f}, ATR={atr_e}, "
+                                    f"new_lock=Rs.{new_lock:.2f} (tier={tier})"
+                                )
+
                         await coll.update_one(
                             {"holdings.ticker": ticker},
                             update_ops,
                         )
+                        # Pre-compute to avoid nested f-string backslash error (Python < 3.12)
+                        set_ops = update_ops.get("$set", {})
+                        lock_val = set_ops.get("holdings.$.locked_stop_price")
+                        lock_suffix = f", locked stop at Rs.{lock_val}" if lock_val is not None else ""
                         logger.info(
                             f"Updated {ticker} profit tier tracking: "
-                            f"added '{tier}'"
-                            f"{f', locked stop at Rs.{lock_stop:.2f}' if lock_stop else ''}"
+                            f"added '{tier}'{lock_suffix}"
                         )
                     except Exception as e:
                         logger.warning(f"Could not update tier tracking for {ticker}: {e}")
@@ -1063,10 +1190,25 @@ def start_scheduler():
         max_instances=1,
     )
 
+    # Post-market daily report at 15:35 IST (after market close)
+    _scheduler.add_job(
+        generate_daily_report,
+        CronTrigger(
+            hour="15",
+            minute="35",
+            day_of_week="mon-fri",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="daily_report",
+        name="Post-Close Daily Report",
+        max_instances=1,
+    )
+
     _scheduler.start()
     logger.info(
         f"Scheduler started — Analysis hourly {settings.market_open_hour}:15-"
-        f"{settings.market_close_hour}:15 IST, Risk checks every 30min"
+        f"{settings.market_close_hour}:15 IST, Risk checks every 30min, "
+        f"Daily report 15:35 IST"
     )
 
     return _scheduler

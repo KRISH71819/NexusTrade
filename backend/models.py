@@ -119,7 +119,7 @@ class AnalysisResult(BaseModel):
     current_price: float
 
     # ML Engine output
-    ml_confidence: float  # 0.0 – 1.0 (probability of bullish trend)
+    ml_confidence: Optional[float] = None  # 0.0-1.0 bullish probability; None when ML FAILED (insufficient data / error)
     ml_features_used: dict = {}
 
     # LLM Engine output (Gemini structured decision)
@@ -154,7 +154,7 @@ class Trade(BaseModel):
     total_value: float
 
     # Transparency — full AI brain snapshot
-    ml_confidence: float
+    ml_confidence: Optional[float] = None
     news_headlines: List[str] = []
     gemini_sentiment_score: float
     gemini_explanation: str

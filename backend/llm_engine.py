@@ -194,8 +194,17 @@ def _analyze_sync(
     """Synchronous API call with primary model + fallback cascade."""
     client = _get_client()
     if not client:
-        logger.warning("API key not configured. Returning neutral decision.")
-        return GeminiDecision().model_dump()
+        logger.warning("API key not configured. Marking analysis FAILED (no LLM = no signal).")
+        return {
+            "status": "FAILED",
+            "action": "HOLD",
+            "confidence": None,
+            "position_size_pct": 0.0,
+            "risk_factors": ["LLM API key not configured"],
+            "reasoning": "LLM unavailable (no API key). Ticker skipped this cycle.",
+            "news_impact_score": None,
+            "crisis_detected": False,
+        }
 
     prompt = _build_analysis_prompt(
         ticker, technical_snapshot, macro_news,
@@ -215,12 +224,13 @@ def _analyze_sync(
     # All models failed
     logger.error(f"All models exhausted for {ticker}")
     return {
+        "status": "FAILED",
         "action": "HOLD",
-        "confidence": 0.5,
+        "confidence": None,
         "position_size_pct": 0.0,
         "risk_factors": ["All LLM models failed after retries"],
-        "reasoning": "LLM API unavailable. Defaulting to HOLD.",
-        "news_impact_score": 0.0,
+        "reasoning": "LLM API unavailable after retries. Ticker skipped this cycle.",
+        "news_impact_score": None,
         "crisis_detected": False,
     }
 

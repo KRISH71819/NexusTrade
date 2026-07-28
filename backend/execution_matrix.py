@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def compute_final_score(
     gemini_confidence: float,
-    ml_confidence: float,
+    ml_confidence: float | None,
     news_impact_score: float,
     risk_adjustment: float,
 ) -> float:
@@ -34,7 +34,10 @@ def compute_final_score(
 
     Args:
         gemini_confidence: 0.0-1.0, from Gemini structured analysis
-        ml_confidence: 0.0-1.0, from ML ensemble
+        ml_confidence: 0.0-1.0 from ML ensemble, or None when ML FAILED.
+                       When None, the ML term is dropped and the remaining
+                       weights are renormalized — a failed ML must NOT inject a
+                       fake neutral 0.5 into the decision (Batch 1.2).
         news_impact_score: -1.0 to 1.0, from news intelligence
         risk_adjustment: -1.0 to 1.0, from risk manager
 
@@ -47,12 +50,18 @@ def compute_final_score(
     # Normalize risk_adjustment from [-1, 1] to [0, 1]
     risk_normalized = (risk_adjustment + 1.0) / 2.0
 
-    score = (
-        settings.weight_gemini * gemini_confidence +
-        settings.weight_ml * ml_confidence +
-        settings.weight_news * news_normalized +
-        settings.weight_risk * risk_normalized
-    )
+    terms = [
+        (settings.weight_gemini, gemini_confidence),
+        (settings.weight_news, news_normalized),
+        (settings.weight_risk, risk_normalized),
+    ]
+    if ml_confidence is not None:
+        terms.append((settings.weight_ml, ml_confidence))
+
+    total_weight = sum(w for w, _ in terms)
+    if total_weight <= 0:
+        return 0.0
+    score = sum(w * v for w, v in terms) / total_weight
 
     return max(0.0, min(1.0, score))
 
@@ -206,7 +215,7 @@ def build_action_reason(
     action: TradeAction,
     final_score: float,
     gemini_confidence: float,
-    ml_confidence: float,
+    ml_confidence: float | None,
     news_impact_score: float,
     risk_adjustment: float,
     gemini_reasoning: str = "",
@@ -217,10 +226,11 @@ def build_action_reason(
 ) -> str:
     """Build a human-readable, fully transparent reason for the trade decision."""
 
+    ml_str = f"{ml_confidence:.0%}" if ml_confidence is not None else "N/A"
     score_breakdown = (
         f"Final Score: {final_score:.2f} "
         f"[Gemini {gemini_confidence:.0%} × {settings.weight_gemini:.0%} + "
-        f"ML {ml_confidence:.0%} × {settings.weight_ml:.0%} + "
+        f"ML {ml_str} × {settings.weight_ml:.0%} + "
         f"News {news_impact_score:+.2f} × {settings.weight_news:.0%} + "
         f"Risk {risk_adjustment:+.2f} × {settings.weight_risk:.0%}]"
     )
