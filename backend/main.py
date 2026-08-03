@@ -135,11 +135,43 @@ app.include_router(realtime.router, prefix="/api", tags=["Real-Time Feed"])
 
 # ── Health Check ─────────────────────────────────────────────────────────────
 
+@app.get("/ping", tags=["System"], include_in_schema=False)
+async def ping():
+    """
+    Ultra-lightweight keep-alive endpoint for cron jobs.
+
+    IMPORTANT — point your cron-job.org job HERE, not at /docs or /api/health:
+      https://krish71819-nexustrade-backend.hf.space/ping
+
+    Why: This returns immediately with zero DB calls and zero imports so it
+    responds even before MongoDB finishes connecting on cold start. /docs causes
+    HF to fully boot the app; if that takes > cron timeout we get 503 and the
+    cron job accumulates failures until cron-job.org auto-disables it.
+    """
+    return {"ok": True}
+
+
 @app.get("/api/health", tags=["System"])
 async def health_check():
-    from kill_switch import is_kill_switch_on
-    from market_feed import is_feed_connected
-    kill_switch = await is_kill_switch_on()
+    """Full health check — safe to call but can be slow on cold start."""
+    # Wrap every external call so a cold-start DB delay never returns 503.
+    kill_switch = False
+    feed_connected = False
+    db_status = "unknown"
+
+    try:
+        from kill_switch import is_kill_switch_on
+        kill_switch = await is_kill_switch_on()
+        db_status = "ok"
+    except Exception as exc:
+        db_status = f"unavailable ({exc.__class__.__name__})"
+
+    try:
+        from market_feed import is_feed_connected
+        feed_connected = is_feed_connected()
+    except Exception:
+        pass
+
     return {
         "status": "healthy",
         "service": "NexusTrade AI Agent",
@@ -147,7 +179,8 @@ async def health_check():
         "trading_mode": settings.trading_mode,
         "kill_switch_active": kill_switch,
         "dhan_enabled": settings.dhan_trading_enabled,
-        "realtime_feed": is_feed_connected(),
+        "realtime_feed": feed_connected,
+        "db": db_status,
     }
 
 
