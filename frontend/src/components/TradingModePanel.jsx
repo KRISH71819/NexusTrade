@@ -19,6 +19,7 @@ import {
   X,
   Lock,
 } from "lucide-react";
+import LLMConfigCard from "./LLMConfigCard";
 
 export default function TradingModePanel() {
   const [tradingMode, setTradingMode] = useState(null);
@@ -630,6 +631,9 @@ export default function TradingModePanel() {
           </div>
         </div>
       )}
+
+      {/* ── Multi-Agent LLM Configuration ── */}
+      <LLMConfigCard />
     </div>
   );
 }

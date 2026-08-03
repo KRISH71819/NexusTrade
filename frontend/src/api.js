@@ -87,6 +87,15 @@ export const api = {
   // ── Real-Time Feed ────────────────────────────────────────────────────
   realtimeStatus: () => request("/api/realtime/status"),
   realtimePrices: () => request("/api/realtime/prices"),
+
+  // ── LLM Multi-Agent Config ────────────────────────────────────────────
+  getLLMConfig: () => request("/api/llm-config"),
+  setLLMMode: (mode) =>
+    request("/api/llm-config", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
+  getLLMUsage: () => request("/api/llm-config/usage"),
 };
 
 /**

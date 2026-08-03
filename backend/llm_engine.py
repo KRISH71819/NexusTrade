@@ -1,24 +1,20 @@
 """
-LLM Engine — Gemma 4 31B as the PRIMARY structured decision-maker.
+LLM Engine — Multi-Agent Chain Orchestrator.
 
-Uses Gemma 4 31B (1,500 RPD / 15 RPM / Unlimited TPM) for high-volume
-structured financial analysis.  Falls back to Gemini 3.1 Flash Lite
-(500 RPD) if the primary model errors out.
+Chain mode (recommended):
+  Agent 2 (Analyst):  Kimi K3 via TokenRouter (2.8T params, FREE)
+  Agent 3 (Reviewer): Gemma 4 31B (challenges Kimi's decisions)
+  Fallback:           If Kimi is down → Gemma auto-promotes to analyst
 
-Receives:
-  1. Macro news (global + India economy)
-  2. Sector news
-  3. Stock-specific news
-  4. Full technical snapshot (RSI, MACD, BB, SMA crossovers)
-  5. Current portfolio state
-  6. Risk limits
+Single mode:
+  Gemma 4 31B only (existing behaviour, no Kimi needed)
 
-And returns a structured JSON decision with action, confidence,
-position sizing, risk factors, and detailed reasoning.
+Entry point: analyze_with_llm()  (replaces analyze_with_gemini in scheduler)
 """
 
 import logging
 import asyncio
+import json as json_module
 import re
 import time
 import threading
@@ -332,7 +328,7 @@ def _try_model(client, model_name: str, prompt: str, ticker: str) -> Optional[di
 
 
 
-async def analyze_with_gemini(
+async def analyze_with_gemma(
     ticker: str,
     technical_snapshot: Dict,
     macro_news: List[str],
@@ -342,7 +338,7 @@ async def analyze_with_gemini(
     risk_info: Dict,
 ) -> dict:
     """
-    Full LLM structured analysis — the PRIMARY decision-maker.
+    Gemma 4 analysis — FALLBACK analyst when Kimi is down, also used as reviewer base.
 
     Uses Gemma 4 31B (primary) with Gemini 3.1 Flash Lite fallback.
     Returns a decision dict with action, confidence,
@@ -350,14 +346,307 @@ async def analyze_with_gemini(
     """
     budget = get_daily_budget_status()
     logger.info(
-        f"Running LLM analysis for {ticker} | "
+        f"Running Gemma analysis for {ticker} | "
         f"budget: {budget['calls_today']}/{budget['daily_limit']} used"
     )
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _analyze_sync,
         ticker, technical_snapshot, macro_news,
         sector_news, stock_news, portfolio_state, risk_info,
     )
+    if result.get("status") != "FAILED":
+        result["analyst_model"] = "gemma"
+    return result
+
+
+# Backward-compatible alias (scheduler may still import this name)
+analyze_with_gemini = analyze_with_gemma
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   GEMMA REVIEWER — challenges the primary analyst's (Kimi K3) decisions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_REVIEWER_PROMPT = """You are a risk-focused portfolio manager reviewing a trade recommendation from a quantitative analyst.
+
+═══ ANALYST'S RECOMMENDATION ═══
+  Stock: {ticker}
+  Action: {action}
+  Confidence: {confidence:.0%}
+  Reasoning: {reasoning}
+  Risk factors identified: {risk_factors}
+
+═══ KEY DATA (verify the analyst's claims) ═══
+  Price: Rs.{price}
+  RSI: {rsi}
+  MACD signal: {macd_signal}
+  Volume: {vol_ratio}x avg
+  News sentiment: {news_impact}
+  Market regime: {regime}
+  Portfolio cash: {cash_pct}
+
+═══ YOUR TASK ═══
+The analyst may be overconfident. Your job:
+1. Does the reasoning hold up against the actual data?
+2. What risks did the analyst MISS or underweight?
+3. Is the confidence level justified?
+4. Your verdict: AGREE (sounds right), CAUTION (lower confidence), or VETO (block trade entirely)
+
+Return ONLY valid JSON with no extra text:
+{{
+  "verdict": "AGREE" or "CAUTION" or "VETO",
+  "adjusted_confidence": 0.0 to 1.0,
+  "missed_risks": ["risk 1", "risk 2"],
+  "review_notes": "your reasoning"
+}}"""
+
+
+def _gemma_review_sync(
+    ticker: str,
+    analyst_result: dict,
+    raw_context: dict,
+) -> Optional[dict]:
+    """
+    Synchronous Gemma review call.
+    Returns parsed review dict or None on failure.
+    """
+    client = _get_client()
+    if not client:
+        return None
+
+    price = raw_context.get("price", 0)
+    price_str = f"{price:.2f}" if isinstance(price, (int, float)) else str(price)
+
+    news_impact = analyst_result.get("news_impact_score", 0)
+    news_str = f"{news_impact:+.2f}" if isinstance(news_impact, (int, float)) else str(news_impact)
+
+    cash_pct = raw_context.get("cash_pct", 0)
+    cash_str = f"{cash_pct:.0%}" if isinstance(cash_pct, (int, float)) else str(cash_pct)
+
+    # Build reviewer prompt with analyst output + key data
+    prompt = _REVIEWER_PROMPT.format(
+        ticker=ticker,
+        action=analyst_result.get("action", "HOLD"),
+        confidence=analyst_result.get("confidence", 0.5),
+        reasoning=analyst_result.get("reasoning", "No reasoning provided")[:500],
+        risk_factors=", ".join(analyst_result.get("risk_factors", [])[:5]) or "None identified",
+        price=price_str,
+        rsi=raw_context.get("rsi", "N/A"),
+        macd_signal=raw_context.get("macd_signal", "N/A"),
+        vol_ratio=raw_context.get("volume_ratio", "N/A"),
+        news_impact=news_str,
+        regime=raw_context.get("market_regime", "UNKNOWN"),
+        cash_pct=cash_str,
+    )
+
+    try:
+        _rate_limit_wait()
+        _increment_daily_counter()
+
+        response = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=settings.gemini_reviewer_temperature,
+            ),
+        )
+
+        raw_text = response.text
+        clean = _sanitize_json(raw_text)
+        parsed = json_module.loads(clean)
+
+        verdict = str(parsed.get("verdict", "AGREE")).upper()
+        if verdict not in ("AGREE", "CAUTION", "VETO"):
+            verdict = "AGREE"
+
+        adj_conf = parsed.get("adjusted_confidence")
+        if adj_conf is not None:
+            adj_conf = max(0.0, min(1.0, float(adj_conf)))
+
+        logger.info(
+            f"Gemma review for {ticker}: verdict={verdict}, "
+            f"adj_conf={adj_conf}, missed_risks={parsed.get('missed_risks', [])}"
+        )
+
+        return {
+            "verdict": verdict,
+            "adjusted_confidence": adj_conf,
+            "missed_risks": parsed.get("missed_risks", []),
+            "review_notes": parsed.get("review_notes", ""),
+        }
+
+    except Exception as e:
+        logger.warning(f"Gemma review failed for {ticker}: {e}")
+        return None
+
+
+async def review_with_gemma(
+    ticker: str,
+    analyst_result: dict,
+    raw_context: dict,
+) -> Optional[dict]:
+    """Async wrapper for Gemma reviewer."""
+    return await asyncio.to_thread(
+        _gemma_review_sync, ticker, analyst_result, raw_context,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   REVIEW VERDICT ARBITER (code, not LLM)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Track review stats for daily reporting
+_review_stats_lock = threading.Lock()
+_review_stats = {"agreed": 0, "cautioned": 0, "vetoed": 0, "skipped": 0, "date": str(date.today())}
+
+
+def get_review_stats() -> dict:
+    """Return today's review verdict stats."""
+    with _review_stats_lock:
+        today = str(date.today())
+        if _review_stats["date"] != today:
+            _review_stats.update({"agreed": 0, "cautioned": 0, "vetoed": 0, "skipped": 0, "date": today})
+        return dict(_review_stats)
+
+
+def _record_review_stat(verdict: str):
+    """Record a review verdict for daily stats."""
+    with _review_stats_lock:
+        today = str(date.today())
+        if _review_stats["date"] != today:
+            _review_stats.update({"agreed": 0, "cautioned": 0, "vetoed": 0, "skipped": 0, "date": today})
+        key = {"AGREE": "agreed", "CAUTION": "cautioned", "VETO": "vetoed"}.get(verdict, "skipped")
+        _review_stats[key] = _review_stats.get(key, 0) + 1
+
+
+def _apply_review_verdict(analyst_result: dict, review: dict) -> dict:
+    """
+    Code-based arbiter. Applies reviewer verdict to analyst result.
+
+    AGREE:   boost confidence by chain_agree_boost (+8%)
+    CAUTION: use reviewer's adjusted_confidence (floored at chain_caution_floor)
+    VETO:    override action to HOLD, confidence = 0.30
+    """
+    verdict = review.get("verdict", "AGREE").upper()
+    result = {**analyst_result}
+    original_conf = analyst_result.get("confidence", 0.5)
+
+    if verdict == "AGREE":
+        result["confidence"] = min(1.0, original_conf + settings.chain_agree_boost)
+    elif verdict == "CAUTION":
+        adj = review.get("adjusted_confidence")
+        if adj is not None:
+            result["confidence"] = max(settings.chain_caution_floor, adj)
+        else:
+            result["confidence"] = max(settings.chain_caution_floor, original_conf * 0.8)
+    elif verdict == "VETO":
+        result["action"] = "HOLD"
+        result["confidence"] = 0.30
+
+    _record_review_stat(verdict)
+
+    result["review"] = {
+        "verdict": verdict,
+        "original_confidence": original_conf,
+        "adjusted_confidence": result["confidence"],
+        "missed_risks": review.get("missed_risks", []),
+        "notes": review.get("review_notes", ""),
+        "reviewer_model": settings.gemini_model,
+    }
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   MAIN ENTRY POINT — analyze_with_llm (replaces analyze_with_gemini)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def analyze_with_llm(
+    ticker: str,
+    technical_snapshot: Dict,
+    macro_news: List[str],
+    sector_news: List[str],
+    stock_news: List[str],
+    portfolio_state: Dict,
+    risk_info: Dict,
+    raw_context: Optional[Dict] = None,
+) -> dict:
+    """
+    Multi-agent LLM analysis — the MAIN entry point.
+
+    Chain mode:  Kimi K3 (analyst) → Gemma 4 (reviewer)
+    Single mode: Gemma 4 only
+
+    Falls back gracefully if Kimi is down.
+    """
+    analyst_result = None
+    analyst_model = "kimi"
+
+    # ── Step 1: Try Kimi K3 as primary analyst ─────────────────────────
+    if settings.llm_mode == "chain" and settings.kimi_api_key:
+        try:
+            from kimi_engine import analyze_with_kimi
+            analyst_result = await asyncio.wait_for(
+                analyze_with_kimi(
+                    ticker, technical_snapshot, macro_news,
+                    sector_news, stock_news, portfolio_state, risk_info,
+                ),
+                timeout=settings.kimi_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Kimi K3 timed out for {ticker} ({settings.kimi_timeout}s). Falling back to Gemma.")
+        except Exception as e:
+            logger.warning(f"Kimi K3 error for {ticker}: {e}. Falling back to Gemma.")
+
+    # ── Step 2: Fallback to Gemma if Kimi failed ──────────────────────
+    if analyst_result is None:
+        analyst_result = await analyze_with_gemma(
+            ticker, technical_snapshot, macro_news,
+            sector_news, stock_news, portfolio_state, risk_info,
+        )
+        analyst_model = "gemma"
+
+        # If Gemma also failed, return the FAILED result
+        if analyst_result.get("status") == "FAILED":
+            analyst_result["review"] = None
+            return analyst_result
+
+    # ── Step 3: Gemma reviews Kimi's decision (chain mode only) ───────
+    # Only review if: (a) Kimi was the analyst, (b) action is BUY/SELL
+    if analyst_model == "kimi" and analyst_result.get("action") in ("BUY", "SELL"):
+        review = None
+        try:
+            review = await review_with_gemma(
+                ticker, analyst_result, raw_context or {},
+            )
+        except Exception as e:
+            logger.warning(f"Reviewer error for {ticker}: {e}. Using analyst-only decision.")
+
+        if review:
+            analyst_result = _apply_review_verdict(analyst_result, review)
+            verdict = review.get("verdict", "?")
+            logger.info(
+                f"[KIMI→GEMMA:{verdict}] {ticker} "
+                f"{analyst_result.get('action')} "
+                f"{analyst_result['review']['original_confidence']:.2f}"
+                f"→{analyst_result['confidence']:.2f}"
+            )
+        else:
+            _record_review_stat("SKIPPED")
+            analyst_result["review"] = {"skipped": True, "reason": "reviewer unavailable"}
+            logger.info(f"[KIMI-ONLY] {ticker} — reviewer unavailable, using analyst-only decision")
+    elif analyst_model == "kimi":
+        # Kimi said HOLD → skip review
+        _record_review_stat("SKIPPED")
+        analyst_result["review"] = {"skipped": True, "reason": "HOLD — no review needed"}
+    else:
+        # Gemma was analyst (fallback) → no review possible
+        analyst_result["review"] = None
+        if settings.llm_mode == "chain" and settings.kimi_api_key:
+            logger.info(f"[GEMMA-ONLY] {ticker} — Kimi was down, Gemma auto-promoted to analyst")
+
+    analyst_result["analyst_model"] = analyst_model
+    return analyst_result
 
 
 # ── Legacy compatibility wrapper ─────────────────────────────────────────────
@@ -365,9 +654,9 @@ async def analyze_with_gemini(
 async def analyze_sentiment(ticker: str, headlines: List[str]) -> dict:
     """
     Legacy wrapper — kept for backward compatibility.
-    Now delegates to the full Gemini analysis with minimal context.
+    Now delegates to the full analysis with minimal context.
     """
-    result = await analyze_with_gemini(
+    result = await analyze_with_llm(
         ticker=ticker,
         technical_snapshot={},
         macro_news=[],
@@ -377,6 +666,6 @@ async def analyze_sentiment(ticker: str, headlines: List[str]) -> dict:
         risk_info={},
     )
     return {
-        "sentiment_score": result["news_impact_score"],
-        "explanation": result["reasoning"],
+        "sentiment_score": result.get("news_impact_score"),
+        "explanation": result.get("reasoning", ""),
     }

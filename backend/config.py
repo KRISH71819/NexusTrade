@@ -18,10 +18,26 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db_name: str = "paper_trader"
 
-    # ── Google Gemini ────────────────────────────────────────────────────
+    # ── Google Gemini (REVIEWER + FALLBACK ANALYST) ────────────────────
     gemini_api_key: str = ""
     gemini_model: str = "gemma-4-31b-it"
     gemini_fallback_model: str = "gemini-3.1-flash-lite"
+    gemini_reviewer_temperature: float = 0.20       # slightly creative for critical thinking
+
+    # ── Kimi K3 via TokenRouter (PRIMARY ANALYST — FREE) ────────────────
+    kimi_api_key: str = ""
+    kimi_model: str = "moonshotai/kimi-k3-free"
+    kimi_base_url: str = "https://api.tokenrouter.com/v1"
+    kimi_timeout: float = 30.0                      # larger model is slower
+    kimi_temperature: float = 0.15                  # deterministic for analyst
+
+    # ── LLM Chain Mode ──────────────────────────────────────────────────
+    # "single" = Gemma only (current behaviour, no Kimi needed)
+    # "chain"  = Kimi K3 analyzes → Gemma reviews (recommended)
+    # Auto-degrades to "single" if kimi_api_key is empty.
+    llm_mode: str = "chain"
+    chain_agree_boost: float = 0.08                 # +8% confidence when reviewer agrees
+    chain_caution_floor: float = 0.50               # reviewer can't lower below 50%
 
     # ── NewsData.io ──────────────────────────────────────────────────────
     newsdata_api_key: str = ""

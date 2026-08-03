@@ -22,6 +22,7 @@ joblib>=1.4.0
 
 # LLM
 google-genai>=1.10.0
+openai>=1.40.0
 
 # News
 feedparser>=6.0.0

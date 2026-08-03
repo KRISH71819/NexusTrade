@@ -122,6 +122,7 @@ app.add_middleware(
 
 from routers import portfolio, trades, analysis, market, news, analytics, trading_mode  # noqa: E402
 from routers import realtime  # noqa: E402
+from routers import llm_config  # noqa: E402
 
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
 app.include_router(trades.router, prefix="/api", tags=["Trades"])
@@ -131,6 +132,7 @@ app.include_router(news.router, prefix="/api", tags=["News Intelligence"])
 app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(trading_mode.router, prefix="/api", tags=["Trading Mode"])
 app.include_router(realtime.router, prefix="/api", tags=["Real-Time Feed"])
+app.include_router(llm_config.router, tags=["LLM Config"])
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────

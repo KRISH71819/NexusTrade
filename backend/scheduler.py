@@ -27,7 +27,7 @@ from data_ingestion import (
 )
 from news_intelligence import fetch_news_intelligence, get_sector
 from ml_engine import predict_trend
-from llm_engine import analyze_with_gemini
+from llm_engine import analyze_with_llm
 from risk_manager import (
     assess_risk,
     check_stop_losses,
@@ -401,7 +401,7 @@ async def _analyze_single_ticker(
             }
         # If we already HOLD it, continue to LLM so we can decide SELL/HOLD
 
-    # ── 4. Gemini Structured Analysis ────────────────────────────────────
+    # ── 4. Multi-Agent LLM Analysis (Kimi K3 → Gemma reviewer) ─────────
     sector = get_sector(ticker)
     sector_exposure = sum(
         1 for h in portfolio.get("holdings", [])
@@ -413,8 +413,19 @@ async def _analyze_single_ticker(
         "sector_exposure_count": sector_exposure,
     }
 
+    # Build raw_context for the reviewer agent (key data points to verify)
+    cash_total = portfolio.get("total_value", 1)
+    raw_context = {
+        "price": current_price,
+        "rsi": indicators.get("rsi_14"),
+        "macd_signal": indicators.get("macd_signal"),
+        "volume_ratio": indicators.get("volume_ratio", 1.0),
+        "market_regime": market_regime,
+        "cash_pct": portfolio.get("cash", 0) / cash_total if cash_total else 0,
+    }
+
     try:
-        gemini_result = await analyze_with_gemini(
+        gemini_result = await analyze_with_llm(
             ticker=ticker,
             technical_snapshot=indicators,
             macro_news=macro_headlines[:8],
@@ -422,14 +433,16 @@ async def _analyze_single_ticker(
             stock_news=stock_news_headlines[:5],
             portfolio_state=portfolio,
             risk_info=risk_info,
+            raw_context=raw_context,
         )
     except Exception as e:
-        logger.warning(f"Gemini analysis failed for {ticker}: {e}")
+        logger.warning(f"LLM analysis failed for {ticker}: {e}")
         gemini_result = {
             "status": "FAILED",
             "action": "HOLD", "confidence": None, "position_size_pct": 0.0,
-            "risk_factors": [], "reasoning": f"Gemini unavailable: {e}",
+            "risk_factors": [], "reasoning": f"LLM unavailable: {e}",
             "news_impact_score": None, "crisis_detected": False,
+            "review": None,
         }
 
     # ── GATE: LLM FAILED → skip the ticker entirely this cycle (Batch 1.2) ──
@@ -438,7 +451,7 @@ async def _analyze_single_ticker(
     # Held tickers simply stay held, protected by the risk-check stops.
     if gemini_result.get("status") == "FAILED":
         logger.warning(
-            f"SKIPPING {ticker} — LLM FAILED (no valid Gemini read this cycle). "
+            f"SKIPPING {ticker} — LLM FAILED (no valid analysis this cycle). "
             f"Held positions remain protected by stop-loss / trailing scans."
         )
         return {
@@ -456,6 +469,18 @@ async def _analyze_single_ticker(
     crisis_from_news = news_intel.crisis_detected
 
     crisis_detected = crisis_from_gemini or crisis_from_news
+
+    # Log which analyst model was used and review verdict
+    analyst_model = gemini_result.get("analyst_model", "unknown")
+    review_info = gemini_result.get("review")
+    if review_info and not review_info.get("skipped"):
+        review_log = f"reviewed={review_info.get('verdict', '?')}"
+    elif review_info and review_info.get("skipped"):
+        review_log = f"review_skipped ({review_info.get('reason', '')})"
+    else:
+        review_log = "no_review"
+    logger.info(f"LLM result for {ticker}: model={analyst_model} action={gemini_action} "
+                f"conf={gemini_confidence:.2f} {review_log}")
 
     # ── 5. Risk Assessment ───────────────────────────────────────────────
     is_holding = await has_position_for_mode(ticker, active_mode)
