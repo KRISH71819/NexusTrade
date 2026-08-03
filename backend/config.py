@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     kimi_api_key: str = ""
     kimi_model: str = "moonshotai/kimi-k3-free"
     kimi_base_url: str = "https://api.tokenrouter.com/v1"
-    kimi_timeout: float = 30.0                      # larger model is slower
+    kimi_timeout: float = 120.0                     # K3-free routinely takes 30-95s; 30s discarded most results
     kimi_temperature: float = 0.15                  # deterministic for analyst
 
     # ── LLM Chain Mode ──────────────────────────────────────────────────

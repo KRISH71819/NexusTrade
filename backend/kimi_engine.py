@@ -112,7 +112,12 @@ def _sanitize_json(raw: str) -> str:
             if depth == 0:
                 end = i
                 break
-    return text[start:end + 1]
+    fragment = text[start:end + 1]
+    # Python-dict style output: quote unquoted keys (e.g. {action: "BUY"} -> {"action": "BUY"})
+    fragment = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', fragment)
+    # Normalize single-quoted strings to double-quoted (safe: JSON has no escapes in our schema)
+    fragment = re.sub(r"'([^'\\]*)'", r'"\1"', fragment)
+    return fragment
 
 
 # ── Analyst Prompt (same data as Gemma gets) ───────────────────────────────
@@ -190,7 +195,8 @@ def _build_kimi_analyst_prompt(
 7. Consider macro news as a market-wide sentiment override — if macro is very bearish, avoid BUY even if stock technicals look good
 8. Be conservative — when in doubt, HOLD
 
-Return ONLY valid JSON with these exact fields:
+Return ONLY valid JSON with these exact fields.
+IMPORTANT: Use strict JSON — ALL keys and string values must be in DOUBLE quotes. Output nothing before or after the JSON object.
 {{
   "action": "BUY" | "SELL" | "HOLD",
   "confidence": 0.0 to 1.0,
@@ -244,7 +250,8 @@ def _kimi_analyze_sync(
                         "role": "system",
                         "content": (
                             "You are a senior quantitative analyst. "
-                            "Always respond with valid JSON only, no markdown, no explanation outside JSON."
+                            "Always respond with strict JSON only: double-quoted keys and string values, "
+                            "no markdown fences, no single quotes, no text outside the JSON object."
                         ),
                     },
                     {"role": "user", "content": prompt},
