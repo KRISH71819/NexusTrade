@@ -131,83 +131,124 @@ def _build_kimi_analyst_prompt(
     portfolio_state: Dict,
     risk_info: Dict,
 ) -> str:
-    """Build the comprehensive analyst prompt for Kimi K3."""
+    """
+    Build a compact analyst prompt for Kimi K3.
+    Kept short intentionally — the free tier has limited output tokens.
+    We cherry-pick the most signal-rich indicators instead of dumping all.
+    """
 
-    # Format technical indicators
-    tech_lines = []
-    for key, value in technical_snapshot.items():
-        if isinstance(value, (int, float)):
-            tech_lines.append(
-                f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}"
-            )
+    # ── Key technical indicators only (avoids token bloat) ──────────────
+    T = technical_snapshot  # shorthand
+    def _f(key: str, decimals: int = 2) -> str:
+        v = T.get(key)
+        return f"{v:.{decimals}f}" if isinstance(v, (int, float)) else "N/A"
 
-    # Format portfolio state
+    tech_summary = (
+        f"Price={_f('close')}, RSI={_f('rsi_14', 1)}, "
+        f"MACD={_f('macd_line', 3)}/Signal={_f('macd_signal', 3)}, "
+        f"EMA20={_f('ema_20')}, EMA50={_f('ema_50')}, "
+        f"BB_upper={_f('bb_upper')}, BB_lower={_f('bb_lower')}, "
+        f"ATR={_f('atr_14')}, Vol_ratio={_f('volume_ratio', 2)}, "
+        f"ADX={_f('adx', 1)}, Trend={T.get('trend_direction', 'N/A')}"
+    )
+
+    # ── Portfolio context ────────────────────────────────────────────────
     cash = portfolio_state.get("cash", 0)
     total_value = portfolio_state.get("total_value", 0)
     holdings_count = len(portfolio_state.get("holdings", []))
-    current_holding = None
+    holding_info = "not held"
     for h in portfolio_state.get("holdings", []):
         if h.get("ticker") == ticker:
-            current_holding = h
+            qty = h.get("quantity", 0)
+            avg = h.get("avg_price", 0)
+            holding_info = f"holding {qty}sh@Rs{avg:.0f}"
             break
 
-    holding_info = "Not currently held."
-    if current_holding:
-        qty = current_holding.get("quantity", 0)
-        avg = current_holding.get("avg_price", 0)
-        holding_info = f"Currently holding {qty} shares at avg Rs.{avg:.2f}"
+    # ── News (trim to 3 headlines each, 80 chars max per headline) ───────
+    def _news(items: List[str], n: int = 3) -> str:
+        if not items:
+            return "None"
+        return " | ".join(h[:80] for h in items[:n])
 
-    prompt = f"""You are a senior quantitative analyst at a hedge fund. Analyze the following data for {ticker} (NSE India) and make a trading decision.
+    prompt = f"""Analyze {ticker} (NSE India) and output a trading decision as JSON.
 
-═══ MACRO & GLOBAL NEWS (affects entire market) ═══
-{chr(10).join(f'• {h}' for h in macro_news[:8]) if macro_news else '• No significant macro news available'}
+TECHNICALS: {tech_summary}
 
-═══ SECTOR NEWS ═══
-{chr(10).join(f'• {h}' for h in sector_news[:5]) if sector_news else '• No sector-specific news available'}
+NEWS MACRO: {_news(macro_news, 3)}
+NEWS SECTOR: {_news(sector_news, 2)}
+NEWS STOCK: {_news(stock_news, 3)}
 
-═══ STOCK-SPECIFIC NEWS ({ticker}) ═══
-{chr(10).join(f'• {h}' for h in stock_news[:5]) if stock_news else '• No stock-specific news available'}
+PORTFOLIO: cash=Rs{cash:,.0f}, total=Rs{total_value:,.0f}, positions={holdings_count}, {ticker}={holding_info}
+RISK: max_pos={settings.max_single_trade_pct*100:.0f}%, stop_loss={settings.stop_loss_pct*100:.0f}%, sector={risk_info.get('sector','?')}
 
-═══ TECHNICAL INDICATORS ═══
-{chr(10).join(tech_lines) if tech_lines else '  No technical data available'}
+RULES:
+- BUY: strong technicals + positive news + cash available
+- SELL: weakness OR bad news OR risk limit breached
+- HOLD: default when uncertain
+- crisis_detected=true if war/crash/pandemic news; then SELL held stocks, HOLD unowned
 
-═══ PORTFOLIO STATE ═══
-  Cash available: Rs.{cash:,.2f}
-  Total portfolio value: Rs.{total_value:,.2f}
-  Open positions: {holdings_count}
-  {ticker} status: {holding_info}
-
-═══ RISK LIMITS ═══
-  Max position size: {settings.max_single_trade_pct*100:.0f}% of portfolio
-  Stop-loss threshold: {settings.stop_loss_pct*100:.0f}% below entry
-  Max sector concentration: {settings.max_sector_value_pct*100:.0f}% portfolio value per sector
-  Daily loss halt threshold: {settings.daily_loss_halt_pct*100:.1f}%
-  Sector: {risk_info.get('sector', 'Unknown')}
-  Sector stocks already held: {risk_info.get('sector_exposure_count', 0)}
-
-═══ DECISION RULES ═══
-1. If crisis-level events are detected (war, market crash, pandemic), set crisis_detected=true
-2. If crisis_detected is true and we hold the stock, recommend SELL
-3. If crisis_detected is true and we don't hold it, recommend HOLD (don't buy into crisis)
-4. For BUY: require strong technical AND positive news alignment
-5. For SELL: technical weakness OR negative news OR risk limits exceeded
-6. Position size should be proportional to your confidence (high confidence = larger position)
-7. Consider macro news as a market-wide sentiment override — if macro is very bearish, avoid BUY even if stock technicals look good
-8. Be conservative — when in doubt, HOLD
-
-Return ONLY valid JSON with these exact fields.
-IMPORTANT: Use strict JSON — ALL keys and string values must be in DOUBLE quotes. Output nothing before or after the JSON object.
-{{
-  "action": "BUY" | "SELL" | "HOLD",
-  "confidence": 0.0 to 1.0,
-  "position_size_pct": 0.0 to 0.20,
-  "risk_factors": ["factor1", "factor2"],
-  "reasoning": "3-5 sentence explanation",
-  "news_impact_score": -1.0 to 1.0,
-  "crisis_detected": true | false
-}}"""
+Respond with ONLY this JSON (no other text):
+{{"action":"HOLD","confidence":0.0,"position_size_pct":0.0,"risk_factors":[],"reasoning":"","news_impact_score":0.0,"crisis_detected":false}}"""
 
     return prompt
+
+
+def _repair_truncated_json(raw: str) -> Optional[str]:
+    """
+    Try to repair JSON that was cut off mid-stream (finish_reason=length).
+    Attempts to close any open braces/brackets so json.loads can parse it.
+    Returns repaired string or None if beyond salvaging.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+
+    # Find start of JSON object
+    start = text.find("{")
+    if start == -1:
+        return None
+    text = text[start:]
+
+    # Count open braces/brackets
+    depth_brace = 0
+    depth_bracket = 0
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth_brace += 1
+        elif ch == "}":
+            depth_brace -= 1
+        elif ch == "[":
+            depth_bracket += 1
+        elif ch == "]":
+            depth_bracket -= 1
+
+    # Close any open string
+    if in_string:
+        text += '"'
+
+    # Close open brackets/braces
+    text += "]" * max(0, depth_bracket)
+    text += "}" * max(0, depth_brace)
+
+    # Try parsing
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        return None
 
 
 # ── Synchronous API Call ───────────────────────────────────────────────────
@@ -250,20 +291,38 @@ def _kimi_analyze_sync(
                         "role": "system",
                         "content": (
                             "You are a senior quantitative analyst. "
-                            "Always respond with strict JSON only: double-quoted keys and string values, "
-                            "no markdown fences, no single quotes, no text outside the JSON object."
+                            "You MUST respond with a single valid JSON object only. "
+                            "No markdown code fences, no text before or after the JSON. "
+                            "All JSON keys and string values must use double quotes."
                         ),
                     },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=settings.kimi_temperature,
-                max_completion_tokens=1024,
+                max_tokens=512,  # keep output short — we only need 7 fields
+                response_format={"type": "json_object"},  # force JSON mode
             )
 
-            raw_text = response.choices[0].message.content
-            if not raw_text:
-                logger.warning(f"Kimi returned empty response for {ticker} (attempt {attempt + 1})")
+            choice = response.choices[0]
+            finish_reason = choice.finish_reason
+            raw_text = choice.message.content
+
+            if not raw_text or raw_text.strip() in ("", "{}"):
+                logger.warning(
+                    f"Kimi returned empty response for {ticker} "
+                    f"(attempt {attempt + 1}, finish_reason={finish_reason})"
+                )
                 continue
+
+            if finish_reason == "length":
+                # Response was truncated — try to salvage partial JSON
+                logger.warning(
+                    f"Kimi output truncated for {ticker} (finish_reason=length). "
+                    "Trying to salvage partial JSON."
+                )
+                raw_text = _repair_truncated_json(raw_text)
+                if not raw_text:
+                    continue
 
             clean_json = _sanitize_json(raw_text)
             parsed = json.loads(clean_json)
