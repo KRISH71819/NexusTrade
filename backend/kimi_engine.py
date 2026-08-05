@@ -277,7 +277,7 @@ def _kimi_analyze_sync(
         sector_news, stock_news, portfolio_state, risk_info,
     )
 
-    max_retries = 2  # fewer retries than Gemma — save time for fallback
+    max_retries = 1  # 1 try only — if Kimi fails, fall back to Gemma immediately
 
     for attempt in range(max_retries):
         try:
@@ -290,17 +290,23 @@ def _kimi_analyze_sync(
                     {
                         "role": "system",
                         "content": (
-                            "You are a senior quantitative analyst. "
-                            "You MUST respond with a single valid JSON object only. "
-                            "No markdown code fences, no text before or after the JSON. "
-                            "All JSON keys and string values must use double quotes."
+                            "You are a quantitative trading analyst. "
+                            "Output ONLY a JSON object with these exact keys: "
+                            "action (BUY/SELL/HOLD), confidence (0-1), "
+                            "position_size_pct (0-0.2), risk_factors (array of strings), "
+                            "reasoning (string), news_impact_score (-1 to 1), "
+                            "crisis_detected (true/false). "
+                            "No markdown, no text outside the JSON."
                         ),
                     },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=settings.kimi_temperature,
-                max_tokens=512,  # keep output short — we only need 7 fields
-                response_format={"type": "json_object"},  # force JSON mode
+                max_tokens=400,   # 7 compact fields need <200 tokens; 400 is generous
+                timeout=25.0,     # fail fast — don't wait 120s for TokenRouter
+                # NOTE: response_format={"type":"json_object"} is NOT used here.
+                # kimi-k3-free on TokenRouter does not support it and returns
+                # empty content when the parameter is present.
             )
 
             choice = response.choices[0]
