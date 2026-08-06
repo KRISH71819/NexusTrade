@@ -401,7 +401,7 @@ async def _analyze_single_ticker(
             }
         # If we already HOLD it, continue to LLM so we can decide SELL/HOLD
 
-    # ── 4. Multi-Agent LLM Analysis (Kimi K3 → Gemma reviewer) ─────────
+    # ── 4. Multi-Agent LLM Analysis (Groq compound → Gemma reviewer) ───
     sector = get_sector(ticker)
     sector_exposure = sum(
         1 for h in portfolio.get("holdings", [])

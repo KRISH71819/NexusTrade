@@ -4,7 +4,7 @@ import { api } from "../api";
 /**
  * LLM Multi-Agent Configuration Card.
  *
- * Displays the current LLM chain mode (Kimi K3 analyst → Gemma reviewer),
+ * Displays the current LLM chain mode (Groq analyst → Gemma reviewer),
  * allows toggling between single/chain mode, and shows daily usage stats.
  */
 export default function LLMConfigCard() {
@@ -44,7 +44,7 @@ export default function LLMConfigCard() {
       const result = await api.setLLMMode(newMode);
       await loadData();
       if (result.effective_mode !== newMode) {
-        setError(result.message || "Mode degraded — check Kimi API key");
+        setError(result.message || "Mode degraded — check Groq API key");
       }
     } catch (e) {
       setError(e.message || "Failed to update mode");
@@ -80,6 +80,12 @@ export default function LLMConfigCard() {
   const isChain = config.effective_mode === "chain";
   const reviews = usage?.review_stats || {};
 
+  // Groq compound + llama calls today
+  const compoundCalls = usage?.groq_compound_calls_today ?? 0;
+  const compoundLimit = usage?.groq_compound_daily_limit ?? 250;
+  const llamaCalls = usage?.groq_llama_calls_today ?? 0;
+  const llamaLimit = usage?.groq_llama_daily_limit ?? 1000;
+
   return (
     <div style={styles.card}>
       {/* Header */}
@@ -98,7 +104,7 @@ export default function LLMConfigCard() {
       {/* Mode Toggle */}
       <div style={styles.toggleRow}>
         <span style={styles.toggleLabel}>
-          {isChain ? "Kimi K3 → Gemma Review" : "Gemma Only"}
+          {isChain ? "Groq → Gemma Review" : "Gemma Only"}
         </span>
         <button
           onClick={toggleMode}
@@ -125,25 +131,34 @@ export default function LLMConfigCard() {
         }}>
           <div style={styles.agentRole}>🔬 Analyst</div>
           <div style={styles.agentModel}>
-            {isChain ? "Kimi K3" : "Gemma 4"}
+            {isChain ? "Groq/Compound" : "Gemma 4"}
           </div>
           <div style={styles.agentParams}>
-            {isChain ? "2.8T params" : "31B params"}
+            {isChain ? "compound → llama-3.3-70b" : "31B params"}
           </div>
           <div style={styles.agentStatus}>
             <span style={{
               ...styles.statusDot,
-              background: (isChain ? config.kimi_api_key_configured : config.gemini_api_key_configured)
+              background: (isChain ? config.groq_api_key_configured : config.gemini_api_key_configured)
                 ? "#10b981" : "#ef4444",
             }} />
-            {(isChain ? config.kimi_api_key_configured : config.gemini_api_key_configured)
+            {(isChain ? config.groq_api_key_configured : config.gemini_api_key_configured)
               ? "API Key ✓" : "No Key ✗"}
           </div>
-          {usage && (
+          {isChain && usage && (
             <div style={styles.agentCalls}>
-              {isChain
-                ? `${usage.kimi_calls_today} calls today`
-                : `${usage.gemma_calls_today}/${usage.gemma_daily_limit} calls`}
+              <span style={{ color: "#a78bfa" }}>
+                compound: {compoundCalls}/{compoundLimit}
+              </span>
+              {" · "}
+              <span style={{ color: "#60a5fa" }}>
+                llama: {llamaCalls}/{llamaLimit}
+              </span>
+            </div>
+          )}
+          {!isChain && usage && (
+            <div style={styles.agentCalls}>
+              {`${usage.gemma_calls_today}/${usage.gemma_daily_limit} calls`}
             </div>
           )}
         </div>

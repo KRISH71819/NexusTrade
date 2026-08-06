@@ -282,6 +282,7 @@ def _call_groq_model(
     """
     Make a single Groq API call for the given model.
     Returns parsed result dict or None on failure.
+    Raises exception on API/network errors (caller decides fallback logic).
     """
     model_key = "compound" if "compound" in model else "llama"
 
@@ -331,7 +332,7 @@ def _call_groq_model(
             return None
 
     clean_json = _sanitize_json(raw_text)
-    parsed = json.loads(clean_json)
+    parsed = json.loads(clean_json)  # JSON errors propagate to caller
 
     action = str(parsed.get("action", "HOLD")).upper()
     if action not in ("BUY", "SELL", "HOLD"):
@@ -365,6 +366,21 @@ def _call_groq_model(
     }
 
 
+def _is_daily_limit_error(err_str: str) -> bool:
+    """
+    Return True ONLY if the 429 error is a daily (RPD) exhaustion,
+    NOT a temporary per-minute rate limit.
+    Groq daily limit messages contain 'requests per day' or 'daily' in them.
+    """
+    lower = err_str.lower()
+    # These phrases indicate true daily RPD exhaustion
+    if "requests per day" in lower or "daily request" in lower:
+        return True
+    # openai/gpt-oss-120b errors are from groq/compound's internal sub-model
+    # and are TPM/RPM limits — NOT our daily limit. Do NOT mark compound as exhausted.
+    return False
+
+
 # ── Synchronous Analysis with compound → llama fallback ───────────────────────
 
 def _groq_analyze_sync(
@@ -377,13 +393,9 @@ def _groq_analyze_sync(
     risk_info: Dict,
 ) -> Optional[dict]:
     """
-    Synchronous Groq analysis.
+    Synchronous Groq analysis with compound → llama fallback.
 
-    Model priority:
-      1. groq/compound   (best quality, 250 RPD)
-      2. llama-3.3-70b-versatile (solid fallback, 1000 RPD)
-
-    Returns structured analysis dict or None on total failure.
+    Returns structured analysis dict or None if all Groq models fail.
     """
     client = _get_client()
     if not client:
@@ -402,7 +414,7 @@ def _groq_analyze_sync(
     ]
 
     for model, model_key in MODELS:
-        # Skip if this model has hit its daily limit
+        # Skip if this model has hit its true daily request limit
         if _is_model_exhausted(model):
             logger.info(
                 f"Groq [{model}] daily limit reached — "
@@ -417,17 +429,36 @@ def _groq_analyze_sync(
             # Empty response → try next model
             logger.warning(f"Groq [{model}] gave empty result for {ticker}, trying next model")
 
+        except json.JSONDecodeError as e:
+            # Bad JSON from model — try next model, do NOT mark as exhausted
+            logger.warning(
+                f"Groq [{model}] JSON parse error for {ticker}: {e} — trying next model"
+            )
+            continue
+
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "rate" in err_str.lower() or "limit" in err_str.lower():
+            is_429 = "429" in err_str
+            is_daily = _is_daily_limit_error(err_str)
+
+            if is_429 and is_daily:
+                # True daily limit hit — mark exhausted and try next model
                 logger.warning(
-                    f"Groq [{model}] rate limited for {ticker} — "
-                    f"switching to next model. Error: {err_str[:150]}"
+                    f"Groq [{model}] DAILY limit reached for {ticker} — "
+                    f"marking exhausted and falling back. Error: {err_str[:150]}"
                 )
-                # Mark as exhausted for this cycle by bumping counter to limit
                 with _daily_counter_lock:
                     _daily_calls[model_key] = _MODEL_RPD_LIMITS.get(model, 9999)
                 continue
+
+            elif is_429:
+                # Temporary RPM/TPM rate limit — skip THIS ticker but don't exhaust model
+                logger.warning(
+                    f"Groq [{model}] temporary rate limit for {ticker} — "
+                    f"skipping to next model (NOT marking exhausted). Error: {err_str[:150]}"
+                )
+                continue
+
             elif "decommissioned" in err_str or "not supported" in err_str.lower():
                 logger.error(f"Groq [{model}] model decommissioned — skipping. Error: {err_str[:200]}")
                 continue
@@ -466,8 +497,3 @@ async def analyze_with_groq(
         ticker, technical_snapshot, macro_news,
         sector_news, stock_news, portfolio_state, risk_info,
     )
-
-
-# ── Backwards-compatible alias (for any old references) ───────────────────────
-# Remove after confirming all imports are updated.
-kimi_analyze = analyze_with_groq

@@ -338,7 +338,7 @@ async def analyze_with_gemma(
     risk_info: Dict,
 ) -> dict:
     """
-    Gemma 4 analysis — FALLBACK analyst when Kimi is down, also used as reviewer base.
+    Gemma 4 analysis — FALLBACK analyst when Groq is down, also used as reviewer base.
 
     Uses Gemma 4 31B (primary) with Gemini 3.1 Flash Lite fallback.
     Returns a decision dict with action, confidence,
@@ -364,7 +364,7 @@ analyze_with_gemini = analyze_with_gemma
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#   GEMMA REVIEWER — challenges the primary analyst's (Kimi K3) decisions
+#   GEMMA REVIEWER — challenges the primary analyst's (Groq compound) decisions
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _REVIEWER_PROMPT = """You are a risk-focused portfolio manager reviewing a trade recommendation from a quantitative analyst.
