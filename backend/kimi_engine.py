@@ -302,11 +302,8 @@ def _kimi_analyze_sync(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=settings.kimi_temperature,
-                max_tokens=400,   # 7 compact fields need <200 tokens; 400 is generous
-                timeout=25.0,     # fail fast — don't wait 120s for TokenRouter
-                # NOTE: response_format={"type":"json_object"} is NOT used here.
-                # kimi-k3-free on TokenRouter does not support it and returns
-                # empty content when the parameter is present.
+                max_tokens=512,
+                response_format={"type": "json_object"},  # Groq supports this natively
             )
 
             choice = response.choices[0]

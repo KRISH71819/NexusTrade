@@ -25,9 +25,9 @@ class LLMConfigResponse(BaseModel):
     analyst_model_label: str
     reviewer_model: str
     reviewer_model_label: str
-    kimi_api_key_configured: bool
+    groq_api_key_configured: bool
     gemini_api_key_configured: bool
-    effective_mode: str  # what's actually running (may differ from mode if no kimi key)
+    effective_mode: str  # what's actually running (may differ from mode if no groq key)
 
 
 class LLMConfigUpdate(BaseModel):
@@ -37,8 +37,12 @@ class LLMConfigUpdate(BaseModel):
 class LLMUsageResponse(BaseModel):
     gemma_calls_today: int
     gemma_daily_limit: int
-    kimi_calls_today: int
-    kimi_model: str
+    groq_compound_calls_today: int
+    groq_compound_daily_limit: int
+    groq_llama_calls_today: int
+    groq_llama_daily_limit: int
+    groq_primary_model: str
+    groq_fallback_model: str
     review_stats: dict
 
 
@@ -46,16 +50,22 @@ class LLMUsageResponse(BaseModel):
 async def get_llm_config():
     """Return current LLM chain configuration."""
     effective_mode = settings.llm_mode
-    if effective_mode == "chain" and not settings.kimi_api_key:
+    if effective_mode == "chain" and not settings.groq_api_key:
         effective_mode = "single"  # auto-degraded
+
+    analyst_label = (
+        f"Groq/{settings.groq_compound_model} → {settings.groq_fallback_model}"
+        if effective_mode == "chain"
+        else "Gemma 4 (31B)"
+    )
 
     return LLMConfigResponse(
         mode=settings.llm_mode,
-        analyst_model=settings.kimi_model if effective_mode == "chain" else settings.gemini_model,
-        analyst_model_label="Kimi K3 (2.8T)" if effective_mode == "chain" else "Gemma 4 (31B)",
+        analyst_model=settings.groq_compound_model if effective_mode == "chain" else settings.gemini_model,
+        analyst_model_label=analyst_label,
         reviewer_model=settings.gemini_model if effective_mode == "chain" else "N/A",
         reviewer_model_label="Gemma 4 (31B)" if effective_mode == "chain" else "N/A (single mode)",
-        kimi_api_key_configured=bool(settings.kimi_api_key),
+        groq_api_key_configured=bool(settings.groq_api_key),
         gemini_api_key_configured=bool(settings.gemini_api_key),
         effective_mode=effective_mode,
     )
@@ -67,9 +77,9 @@ async def update_llm_config(update: LLMConfigUpdate):
     if update.mode and update.mode in ("single", "chain"):
         settings.llm_mode = update.mode
         effective = update.mode
-        if update.mode == "chain" and not settings.kimi_api_key:
+        if update.mode == "chain" and not settings.groq_api_key:
             effective = "single"
-            logger.warning("Chain mode requested but no Kimi API key configured — will use single mode")
+            logger.warning("Chain mode requested but no Groq API key configured — will use single mode")
 
         logger.info(f"LLM mode updated to '{update.mode}' (effective: '{effective}')")
         return {
@@ -77,7 +87,7 @@ async def update_llm_config(update: LLMConfigUpdate):
             "mode": update.mode,
             "effective_mode": effective,
             "message": f"LLM mode set to '{update.mode}'"
-            + (" (degraded to single — no Kimi API key)" if effective != update.mode else ""),
+            + (" (degraded to single — no Groq API key)" if effective != update.mode else ""),
         }
     return {"status": "error", "message": "Invalid mode. Use 'single' or 'chain'."}
 
@@ -88,21 +98,29 @@ async def get_llm_usage():
     gemma_budget = get_daily_budget_status()
     review = get_review_stats()
 
-    # Get Kimi stats
-    kimi_calls = 0
-    kimi_model = settings.kimi_model
+    # Get Groq stats
+    groq_compound_calls = 0
+    groq_llama_calls = 0
+    groq_compound_limit = 250
+    groq_llama_limit = 1000
     try:
-        from kimi_engine import get_kimi_daily_usage
-        kimi_usage = get_kimi_daily_usage()
-        kimi_calls = kimi_usage.get("calls_today", 0)
-        kimi_model = kimi_usage.get("model", settings.kimi_model)
+        from groq_engine import get_groq_daily_usage
+        groq_usage = get_groq_daily_usage()
+        groq_compound_calls = groq_usage.get("compound_calls_today", 0)
+        groq_llama_calls = groq_usage.get("llama_calls_today", 0)
+        groq_compound_limit = groq_usage.get("compound_daily_limit", 250)
+        groq_llama_limit = groq_usage.get("llama_daily_limit", 1000)
     except ImportError:
         pass
 
     return LLMUsageResponse(
         gemma_calls_today=gemma_budget.get("calls_today", 0),
         gemma_daily_limit=gemma_budget.get("daily_limit", 1500),
-        kimi_calls_today=kimi_calls,
-        kimi_model=kimi_model,
+        groq_compound_calls_today=groq_compound_calls,
+        groq_compound_daily_limit=groq_compound_limit,
+        groq_llama_calls_today=groq_llama_calls,
+        groq_llama_daily_limit=groq_llama_limit,
+        groq_primary_model=settings.groq_compound_model,
+        groq_fallback_model=settings.groq_fallback_model,
         review_stats=review,
     )

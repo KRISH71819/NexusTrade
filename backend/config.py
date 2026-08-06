@@ -24,20 +24,23 @@ class Settings(BaseSettings):
     gemini_fallback_model: str = "gemini-3.1-flash-lite"
     gemini_reviewer_temperature: float = 0.20       # slightly creative for critical thinking
 
-    # ── Kimi K3 via TokenRouter (PRIMARY ANALYST — FREE) ────────────────
-    kimi_api_key: str = ""
-    kimi_model: str = "moonshotai/kimi-k3-free"
-    kimi_base_url: str = "https://api.tokenrouter.com/v1"
-    kimi_timeout: float = 35.0                       # 25s HTTP timeout + 10s buffer; fail fast to Gemma
-    kimi_temperature: float = 0.15                  # deterministic for analyst
+    # ── Groq (PRIMARY ANALYST) ──────────────────────────────────────
+    # Model chain: groq/compound (RPD=250) → llama-3.3-70b-versatile (RPD=1K)
+    # compound is tested live and gives the best reasoning; llama is the reliable fallback.
+    groq_api_key: str = ""
+    groq_compound_model: str = "groq/compound"
+    groq_fallback_model: str = "llama-3.3-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_timeout: float = 20.0                       # Groq responds in <15s; 20s is generous
+    groq_temperature: float = 0.15                   # deterministic for analyst
 
-    # ── LLM Chain Mode ──────────────────────────────────────────────────
-    # "single" = Gemma only (current behaviour, no Kimi needed)
-    # "chain"  = Kimi K3 analyzes → Gemma reviews (recommended)
-    # Auto-degrades to "single" if kimi_api_key is empty.
+    # ── LLM Chain Mode ─────────────────────────────────────────
+    # "single" = Gemma only
+    # "chain"  = Groq (compound→llama) analyzes → Gemma reviews (recommended)
+    # Auto-degrades to "single" if groq_api_key is empty.
     llm_mode: str = "chain"
     chain_agree_boost: float = 0.08                 # +8% confidence when reviewer agrees
-    chain_caution_floor: float = 0.50               # reviewer can't lower below 50%
+    chain_caution_floor: float = 0.50               # reviewer can’t lower below 50%
 
     # ── NewsData.io ──────────────────────────────────────────────────────
     newsdata_api_key: str = ""

@@ -2,12 +2,12 @@
 LLM Engine — Multi-Agent Chain Orchestrator.
 
 Chain mode (recommended):
-  Agent 2 (Analyst):  Kimi K3 via TokenRouter (2.8T params, FREE)
-  Agent 3 (Reviewer): Gemma 4 31B (challenges Kimi's decisions)
-  Fallback:           If Kimi is down → Gemma auto-promotes to analyst
+  Agent 2 (Analyst):  Groq API — groq/compound first, llama-3.3-70b fallback
+  Agent 3 (Reviewer): Gemma 4 31B (challenges Groq’s decisions)
+  Fallback:           If Groq is down → Gemma auto-promotes to analyst
 
 Single mode:
-  Gemma 4 31B only (existing behaviour, no Kimi needed)
+  Gemma 4 31B only
 
 Entry point: analyze_with_llm()  (replaces analyze_with_gemini in scheduler)
 """
@@ -574,31 +574,31 @@ async def analyze_with_llm(
     """
     Multi-agent LLM analysis — the MAIN entry point.
 
-    Chain mode:  Kimi K3 (analyst) → Gemma 4 (reviewer)
+    Chain mode:  Groq analyst (compound→llama fallback) → Gemma 4 reviewer
     Single mode: Gemma 4 only
 
-    Falls back gracefully if Kimi is down.
+    Falls back gracefully if Groq is down.
     """
     analyst_result = None
-    analyst_model = "kimi"
+    analyst_model = "groq"
 
-    # ── Step 1: Try Kimi K3 as primary analyst ─────────────────────────
-    if settings.llm_mode == "chain" and settings.kimi_api_key:
+    # ── Step 1: Try Groq as primary analyst ─────────────────────────────
+    if settings.llm_mode == "chain" and settings.groq_api_key:
         try:
-            from kimi_engine import analyze_with_kimi
+            from groq_engine import analyze_with_groq
             analyst_result = await asyncio.wait_for(
-                analyze_with_kimi(
+                analyze_with_groq(
                     ticker, technical_snapshot, macro_news,
                     sector_news, stock_news, portfolio_state, risk_info,
                 ),
-                timeout=settings.kimi_timeout,
+                timeout=settings.groq_timeout,
             )
         except asyncio.TimeoutError:
-            logger.warning(f"Kimi K3 timed out for {ticker} ({settings.kimi_timeout}s). Falling back to Gemma.")
+            logger.warning(f"Groq timed out for {ticker} ({settings.groq_timeout}s). Falling back to Gemma.")
         except Exception as e:
-            logger.warning(f"Kimi K3 error for {ticker}: {e}. Falling back to Gemma.")
+            logger.warning(f"Groq error for {ticker}: {e}. Falling back to Gemma.")
 
-    # ── Step 2: Fallback to Gemma if Kimi failed ──────────────────────
+    # ── Step 2: Fallback to Gemma if Groq failed ──────────────────────
     if analyst_result is None:
         analyst_result = await analyze_with_gemma(
             ticker, technical_snapshot, macro_news,
@@ -611,9 +611,9 @@ async def analyze_with_llm(
             analyst_result["review"] = None
             return analyst_result
 
-    # ── Step 3: Gemma reviews Kimi's decision (chain mode only) ───────
-    # Only review if: (a) Kimi was the analyst, (b) action is BUY/SELL
-    if analyst_model == "kimi" and analyst_result.get("action") in ("BUY", "SELL"):
+    # ── Step 3: Gemma reviews Groq’s decision (chain mode only) ───────
+    # Only review if: (a) Groq was the analyst, (b) action is BUY/SELL
+    if analyst_model == "groq" and analyst_result.get("action") in ("BUY", "SELL"):
         review = None
         try:
             review = await review_with_gemma(
@@ -626,7 +626,7 @@ async def analyze_with_llm(
             analyst_result = _apply_review_verdict(analyst_result, review)
             verdict = review.get("verdict", "?")
             logger.info(
-                f"[KIMI→GEMMA:{verdict}] {ticker} "
+                f"[GROQ→GEMMA:{verdict}] {ticker} "
                 f"{analyst_result.get('action')} "
                 f"{analyst_result['review']['original_confidence']:.2f}"
                 f"→{analyst_result['confidence']:.2f}"
@@ -634,16 +634,16 @@ async def analyze_with_llm(
         else:
             _record_review_stat("SKIPPED")
             analyst_result["review"] = {"skipped": True, "reason": "reviewer unavailable"}
-            logger.info(f"[KIMI-ONLY] {ticker} — reviewer unavailable, using analyst-only decision")
-    elif analyst_model == "kimi":
-        # Kimi said HOLD → skip review
+            logger.info(f"[GROQ-ONLY] {ticker} — reviewer unavailable, using analyst-only decision")
+    elif analyst_model == "groq":
+        # Groq said HOLD → skip review
         _record_review_stat("SKIPPED")
         analyst_result["review"] = {"skipped": True, "reason": "HOLD — no review needed"}
     else:
         # Gemma was analyst (fallback) → no review possible
         analyst_result["review"] = None
-        if settings.llm_mode == "chain" and settings.kimi_api_key:
-            logger.info(f"[GEMMA-ONLY] {ticker} — Kimi was down, Gemma auto-promoted to analyst")
+        if settings.llm_mode == "chain" and settings.groq_api_key:
+            logger.info(f"[GEMMA-ONLY] {ticker} — Groq was down, Gemma auto-promoted to analyst")
 
     analyst_result["analyst_model"] = analyst_model
     return analyst_result
