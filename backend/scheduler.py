@@ -1229,6 +1229,42 @@ def start_scheduler():
         max_instances=1,
     )
 
+    from meta_portfolio import rebalance_meta_portfolio
+    if settings.meta_portfolio_enabled:
+        async def _meta_mtm_job():
+            try:
+                from meta_portfolio import mark_to_market
+                res = await mark_to_market()
+                logger.info(f"META MTM: {res}")
+            except Exception as e:
+                logger.error(f"Meta mark-to-market failed: {e}", exc_info=True)
+
+        _scheduler.add_job(
+            _meta_mtm_job,
+            CronTrigger(
+                hour="15",
+                minute="32",
+                day_of_week="mon-fri",
+                timezone=settings.scheduler_timezone,
+            ),
+            id="meta_mtm",
+            name="Meta Portfolio Mark-To-Market",
+            max_instances=1,
+        )
+
+        _scheduler.add_job(
+            rebalance_meta_portfolio,
+            CronTrigger(
+                hour="15",
+                minute="40",
+                day_of_week="mon-fri",
+                timezone=settings.scheduler_timezone,
+            ),
+            id="meta_rebalance",
+            name="Meta Research Rebalance (paper)",
+            max_instances=1,
+        )
+
     _scheduler.start()
     logger.info(
         f"Scheduler started — Analysis hourly {settings.market_open_hour}:15-"

@@ -43,3 +43,6 @@ frontend/.env.local
 # Agent / IDE metadata
 .agents/
 .gemini/
+
+# External AI Architecture Docs
+docs/ARCHITECTURE_BRIEF_FOR_EXTERNAL_AI.md

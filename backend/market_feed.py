@@ -326,12 +326,20 @@ def _run_dhan_feed():
         _feed_instance = feed
         
         def on_connect(instance):
+            # dhanhq re-fires on_connect on EVERY internal auto-reconnect
+            # (marketfeed.py _run_async -> connect), which happens frequently.
+            # Guard so we only log/set state on a genuine (re)connect, and queue
+            # the resubscribe instead of logging thousands of "CONNECTED" lines.
             global _feed_connected
+            already_connected = _feed_connected
             _feed_connected = True
-            logger.info(
-                f"✓ Dhan MarketFeed CONNECTED — "
-                f"streaming {len(instruments)} instruments"
-            )
+            if already_connected:
+                logger.debug("Dhan MarketFeed re-connected (auto-reconnect)")
+            else:
+                logger.info(
+                    f"✓ Dhan MarketFeed CONNECTED — "
+                    f"streaming {len(instruments)} instruments"
+                )
         
         def on_message(instance, message):
             if isinstance(message, dict):

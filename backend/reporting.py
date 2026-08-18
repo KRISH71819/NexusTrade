@@ -228,6 +228,39 @@ async def _get_friction_today(ist_day_start_utc: datetime, total_value: float) -
     return result
 
 
+async def _get_meta_section_lines() -> list:
+    try:
+        from config import settings
+        from database import get_meta_portfolio_collection, get_meta_equity_collection
+        doc = await get_meta_portfolio_collection().find_one({"_id": "meta"}, {"_id": 0})
+        if not doc:
+            return []
+        total = doc.get("total_value", 0)
+        initial = settings.meta_initial_capital
+        since = ((total / initial) - 1.0) if initial > 0 else 0.0
+        hv = doc.get("holdings_value", 0) or sum(h.get("market_value", 0) for h in doc.get("holdings", []))
+        tv = doc.get("total_value", 0) or 1
+        ex_actual = hv / tv
+        target_exp = doc.get("strat_info", {}).get("exposure", doc.get("exposure_scale", 1.0))
+        eq = await get_meta_equity_collection().find(
+            {}, {"_id": 0, "total_value": 1}).sort("timestamp", -1).limit(2).to_list(length=2)
+        daily_pct = 0.0
+        if len(eq) == 2 and eq[-1].get("total_value", 0) > 0:
+            daily_pct = (eq[0]["total_value"] / eq[-1]["total_value"]) - 1.0
+        n_hold = len([h for h in doc.get("holdings", []) if h.get("quantity", 0) > 0])
+        return [
+            "",
+            "── META RESEARCH PORTFOLIO (isolated paper book) ─────",
+            f"  Value: Rs.{total:>12,.2f}  ({since:+.2%} since inception)",
+            f"  Day: {daily_pct:+.2%} | Exposure: {ex_actual:.0%} "
+            f"(target {target_exp:.0%}) | Holdings: {n_hold}",
+            f"  Last rebalance: {doc.get('last_rebalance', 'n/a')}",
+        ]
+    except Exception as e:
+        logger.warning(f"Meta report section failed: {e}")
+        return []
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #   MAIN REPORT
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -347,6 +380,14 @@ async def generate_daily_report() -> str:
         f"  Total charges: Rs.{friction['total_charges_inr']:,.2f}  "
         f"({friction['total_charges_pct']:.4f}% of portfolio)",
         f"  Trades today:  {friction['trade_count']}",
+    ]
+
+    # Meta research portfolio section
+    meta_lines = await _get_meta_section_lines()
+    if meta_lines:
+        lines += meta_lines
+
+    lines += [
         "",
         "── SYSTEM STATE ───────────────────────────────────────",
         f"  Kill switch:      {'ON  ⛔ (manual clear required)' if kill_switch_on else 'OFF ✅'}",

@@ -1,0 +1,27 @@
+name: hf-keepalive
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 min (GitHub may delay a few min — fine, it's the backup)
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping space
+        id: ping
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 55 \
+            https://krish71819-nexustrade-backend.hf.space/ping)
+          echo "HTTP $code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Restart space if down
+        if: steps.ping.outputs.code != '200'
+        run: |
+          echo "Ping failed -> restarting space via HF API"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            https://huggingface.co/api/spaces/krish71819/nexustrade-backend/restart
+          sleep 60
+          curl -s --max-time 55 https://krish71819-nexustrade-backend.hf.space/ping || true

@@ -107,6 +107,11 @@ def get_cycle_stats_collection():
     return get_db()["cycle_stats"]
 
 
+def get_ohlcv_history_collection():
+    """Daily OHLCV time-series (Phase 0 history engine). One doc per (ticker, date)."""
+    return get_db()["ohlcv_history"]
+
+
 # ── Collections (Live Trading — complete isolation) ──────────────────────────
 
 def get_live_portfolio_collection():
@@ -125,6 +130,18 @@ def get_live_portfolio_history_collection():
 
 def get_system_state_collection():
     return get_db()["system_state"]
+
+
+def get_meta_portfolio_collection():
+    return get_db()["meta_portfolio"]
+
+
+def get_meta_trades_collection():
+    return get_db()["meta_trades"]
+
+
+def get_meta_equity_collection():
+    return get_db()["meta_equity"]
 
 
 # ── Mode-aware collection helpers ────────────────────────────────────────────
@@ -170,6 +187,13 @@ async def _ensure_indexes():
     await db["live_trades"].create_index([("ticker", 1), ("timestamp", -1)])
     await db["live_trades"].create_index([("timestamp", -1)])
     await db["live_portfolio_history"].create_index([("timestamp", -1)])
+
+    # History engine indexes (Phase 0) — unique (ticker, date) makes re-seeds idempotent
+    await db["ohlcv_history"].create_index([("ticker", 1), ("date", 1)], unique=True)
+
+    # Meta research portfolio (Phase 8)
+    await db["meta_trades"].create_index([("timestamp", -1)])
+    await db["meta_equity"].create_index([("timestamp", -1)])
 
     logger.info("MongoDB indexes ensured (paper + live).")
 

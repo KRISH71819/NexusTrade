@@ -151,6 +151,40 @@ class Settings(BaseSettings):
     weight_news: float = 0.20
     weight_risk: float = 0.15
 
+    # ── Alpha Sandbox (Phase 1) — offline backtest gates ───────────────
+    alpha_min_history_days: int = 500          # min daily bars per ticker to test
+    alpha_embargo_days: int = 1                # signal at close t earns the t+1 return
+    alpha_gate_sharpe: float = 1.0             # after-cost Sharpe gate
+    alpha_gate_max_dd: float = 0.25            # max drawdown gate (25%)
+    alpha_fold_count: int = 3                  # walk-forward stability folds
+    alpha_gate_min_fold_win_rate: float = 0.5  # fraction of folds with Sharpe > 0
+
+    # ── Alpha Evolution (Phase 4) ─────────────────────────────────────
+    alpha_max_revisions: int = 2           # critic REVISE loops per candidate
+    alpha_gate_dd_mode: str = "relative"   # "relative" to buy&hold, or "absolute"
+    alpha_gate_dd_relative: float = 0.75   # alpha maxDD must be <= 75% of bench maxDD
+
+    # ── Alpha Sandbox turnover control (Phase 5) ────────────────────────
+    alpha_default_cadence: int = 5          # re-decide positions every N bars (weekly)
+    alpha_default_min_hold: int = 5         # once long, hold at least N bars
+    alpha_max_annual_turnover: float = 24.0 # gate: deployed turnover <= 24x/yr
+
+    # ── Meta Research Portfolio — validated config (Phase 12) ─────────
+    meta_portfolio_enabled: bool = False        # master switch (default OFF)
+    meta_signal_expr: str = "close / sma(close, 200) - 1"  # trend_200 cross-sectional rank
+    meta_top_n: int = 25
+    meta_rebalance_days: int = 60
+    meta_initial_capital: float = 1_000_000.0
+    meta_max_dd_halt: float = 0.25              # halt buys if meta equity 25% below peak
+    meta_use_trend_overlay: bool = True
+    meta_trend_window: int = 200
+    meta_use_vol_target: bool = True
+    meta_target_ann_vol: float = 0.15
+    meta_vol_floor: float = 0.25
+    meta_vol_cap: float = 1.0
+    meta_min_exposure: float = 0.25
+    meta_max_exposure: float = 1.0
+
     @field_validator("watchlist", mode="before")
     @classmethod
     def parse_watchlist(cls, v):
