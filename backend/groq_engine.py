@@ -42,6 +42,10 @@ _daily_calls_date = date.today()
 # Model RPD limits (from Groq console)
 _MODEL_RPD_LIMITS = {
     "groq/compound": 250,
+    "groq/compound-mini": 250,
+    "openai/gpt-oss-120b": 1000,
+    "openai/gpt-oss-20b": 1000,
+    "qwen/qwen3.6-27b": 1000,
     "llama-3.3-70b-versatile": 1000,
 }
 
@@ -87,11 +91,11 @@ def get_groq_daily_usage() -> dict:
             calls = {"compound": 0, "llama": 0}
     return {
         "compound_calls_today": calls.get("compound", 0),
-        "compound_daily_limit": _MODEL_RPD_LIMITS["groq/compound"],
-        "llama_calls_today": calls.get("llama", 0),
-        "llama_daily_limit": _MODEL_RPD_LIMITS["llama-3.3-70b-versatile"],
-        "primary_model": "groq/compound",
-        "fallback_model": "llama-3.3-70b-versatile",
+        "compound_daily_limit": _MODEL_RPD_LIMITS.get(settings.groq_compound_model, 250),
+        "fallback_calls_today": calls.get("llama", 0),
+        "fallback_daily_limit": _MODEL_RPD_LIMITS.get(settings.groq_fallback_model, 1000),
+        "primary_model": settings.groq_compound_model,
+        "fallback_model": settings.groq_fallback_model,
         "date": str(today),
     }
 
@@ -407,10 +411,10 @@ def _groq_analyze_sync(
         sector_news, stock_news, portfolio_state, risk_info,
     )
 
-    # Model priority list: compound first, llama as fallback
+    # Model priority list: compound first, then configured fallback
     MODELS = [
-        ("groq/compound", "compound"),
-        ("llama-3.3-70b-versatile", "llama"),
+        (settings.groq_compound_model, "compound"),
+        (settings.groq_fallback_model, "llama"),
     ]
 
     for model, model_key in MODELS:

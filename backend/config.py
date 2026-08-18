@@ -25,11 +25,11 @@ class Settings(BaseSettings):
     gemini_reviewer_temperature: float = 0.20       # slightly creative for critical thinking
 
     # ── Groq (PRIMARY ANALYST) ──────────────────────────────────────
-    # Model chain: groq/compound (RPD=250) → llama-3.3-70b-versatile (RPD=1K)
-    # compound is tested live and gives the best reasoning; llama is the reliable fallback.
+    # Model chain: groq/compound (RPD=250) → openai/gpt-oss-120b (RPD=1K)
+    # compound is tested live and gives the best reasoning; gpt-oss-120b is the high-quota fallback.
     groq_api_key: str = ""
     groq_compound_model: str = "groq/compound"
-    groq_fallback_model: str = "llama-3.3-70b-versatile"
+    groq_fallback_model: str = "openai/gpt-oss-120b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_timeout: float = 20.0                       # Groq responds in <15s; 20s is generous
     groq_temperature: float = 0.15                   # deterministic for analyst

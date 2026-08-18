@@ -128,7 +128,6 @@ def load_nifty500_watchlist() -> list[str]:
             ("User-Agent", ua),
             ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
             ("Accept-Language", "en-US,en;q=0.5"),
-            ("Accept-Encoding", "gzip, deflate, br"),
             ("Connection", "keep-alive"),
         ]
         opener.addheaders = common_headers
@@ -150,7 +149,11 @@ def load_nifty500_watchlist() -> list[str]:
             },
         )
         with opener.open(request, timeout=15) as response:
-            csv_text = response.read().decode("utf-8-sig")
+            raw_bytes = response.read()
+            if raw_bytes.startswith(b"\x1f\x8b"):
+                import gzip
+                raw_bytes = gzip.decompress(raw_bytes)
+            csv_text = raw_bytes.decode("utf-8-sig")
 
         reader = csv.DictReader(io.StringIO(csv_text))
         symbols = []
