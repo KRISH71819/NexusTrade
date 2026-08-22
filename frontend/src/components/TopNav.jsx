@@ -1,9 +1,18 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Search, SlidersHorizontal, Maximize, Briefcase, ClipboardList, Activity, RefreshCw, CandlestickChart, LayoutDashboard } from 'lucide-react';
+import { api } from '../api';
 
 export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAnalysis, onRefreshMarket, isBusy, timeframe, onTimeframeChange, view = 'chart', onViewChange }) {
   const location = useLocation();
+  const [legacyFrozen, setLegacyFrozen] = useState(true);
+
+  // The Analyze button drives the LEGACY engine — hide it while frozen.
+  useEffect(() => {
+    api.health()
+      .then((h) => setLegacyFrozen(!h?.legacy_engine_enabled))
+      .catch(() => {});
+  }, [location.pathname]);
   
   return (
     <div className="topnav">
@@ -27,7 +36,7 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
         <div className="divider" />
         
         {/* View Toggle (Chart / Scanner) */}
-        {(location.pathname === '/' || location.pathname === '/analysis') && (
+        {(location.pathname === '/chart' || location.pathname === '/analysis') && (
           <div className="segmented" style={{ marginRight: '12px' }}>
             <button 
               className={`top-btn ${view === 'chart' ? 'active' : ''}`}
@@ -69,18 +78,20 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
       </div>
 
       <div className="topnav-section">
-        {/* Run Analysis Button */}
-        <button 
-          className="top-btn" 
-          title="Run Analysis" 
-          onClick={onRunAnalysis}
-          disabled={isBusy}
-          style={{ opacity: isBusy ? 0.5 : 1, padding: '0 12px', gap: '6px', width: 'auto' }}
-          type="button"
-        >
-          <Activity size={16} color="var(--accent)" />
-          <span style={{ fontSize: '12px', fontWeight: 600 }}>Analyze</span>
-        </button>
+        {/* Run Analysis Button — legacy engine; hidden while frozen */}
+        {!legacyFrozen && (
+          <button 
+            className="top-btn" 
+            title="Run Analysis" 
+            onClick={onRunAnalysis}
+            disabled={isBusy}
+            style={{ opacity: isBusy ? 0.5 : 1, padding: '0 12px', gap: '6px', width: 'auto' }}
+            type="button"
+          >
+            <Activity size={16} color="var(--accent)" />
+            <span style={{ fontSize: '12px', fontWeight: 600 }}>Analyze</span>
+          </button>
+        )}
 
         {/* Refresh Market Button */}
         <button 
@@ -99,9 +110,9 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
         
         {/* Action icons */}
         <Link 
-          to="/dashboard" 
-          className={`top-btn ${location.pathname === '/dashboard' ? 'active' : ''}`} 
-          title="Dashboard" 
+          to="/legacy" 
+          className={`top-btn ${location.pathname === '/legacy' ? 'active' : ''}`} 
+          title="Legacy (frozen) — System A" 
           style={{ display: 'grid', placeItems: 'center', color: 'inherit' }}
         >
           <LayoutDashboard size={18} />

@@ -8,14 +8,15 @@ import {
   SlidersHorizontal,
   Briefcase,
   X,
-  Radio,
+  TrendingUp,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { api } from "../api";
 
 const navItems = [
-  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/", icon: TrendingUp, label: "System B", end: true },
   { to: "/analysis", icon: CandlestickChart, label: "Chart" },
+  { to: "/legacy", icon: LayoutDashboard, label: "Legacy (frozen)" },
   { to: "/portfolio", icon: Briefcase, label: "Portfolio" },
   { to: "/news", icon: Newspaper, label: "News" },
   { to: "/trades", icon: ClipboardList, label: "History" },
@@ -53,10 +54,11 @@ export default function Sidebar({ isOpen, onClose }) {
 
         {/* Navigation */}
         <nav className="sidebar-nav">
-          {navItems.map(({ to, icon: Icon, label }) => (
+          {navItems.map(({ to, icon: Icon, label, end }) => (
             <NavLink
               key={to}
               to={to}
+              end={end}
               className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
               onClick={onClose}
               title={label}

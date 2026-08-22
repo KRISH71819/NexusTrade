@@ -57,14 +57,16 @@ async def lifespan(app: FastAPI):
             f"({sec_init.get('count', 0)} instruments)"
         )
 
-        # Start real-time market feed (Dhan WebSocket)
+        # Start real-time market feed (Dhan WebSocket). The feed itself is
+        # gated on legacy_engine_enabled — when frozen it logs and skips, and
+        # the 30-min risk checks use the yfinance polling fallback.
         from market_feed import start_market_feed
         await start_market_feed()
     else:
         logger.info("Dhan not configured — paper-only mode")
 
     start_scheduler()
-    if settings.run_analysis_on_startup:
+    if settings.run_analysis_on_startup and settings.legacy_engine_enabled:
         asyncio.create_task(_run_startup_analysis())
     yield
     # Shutdown
@@ -124,6 +126,7 @@ from routers import portfolio, trades, analysis, market, news, analytics, tradin
 from routers import realtime  # noqa: E402
 from routers import llm_config  # noqa: E402
 from routers import meta  # noqa: E402
+from routers import research  # noqa: E402
 
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
 app.include_router(trades.router, prefix="/api", tags=["Trades"])
@@ -135,6 +138,7 @@ app.include_router(trading_mode.router, prefix="/api", tags=["Trading Mode"])
 app.include_router(realtime.router, prefix="/api", tags=["Real-Time Feed"])
 app.include_router(llm_config.router, tags=["LLM Config"])
 app.include_router(meta.router, prefix="/api", tags=["Meta Research"])
+app.include_router(research.router, prefix="/api", tags=["Research"])
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────
@@ -181,6 +185,8 @@ async def health_check():
         "service": "NexusTrade AI Agent",
         "market": "NSE/BSE (India)",
         "trading_mode": settings.trading_mode,
+        "legacy_engine_enabled": settings.legacy_engine_enabled,
+        "meta_portfolio_enabled": settings.meta_portfolio_enabled,
         "kill_switch_active": kill_switch,
         "dhan_enabled": settings.dhan_trading_enabled,
         "realtime_feed": feed_connected,
@@ -190,7 +196,13 @@ async def health_check():
 
 @app.post("/api/trigger-analysis", tags=["System"])
 async def trigger_analysis():
-    """Manually trigger a full analysis cycle. Force-cancels any running cycle."""
+    """Manually trigger a full analysis cycle (legacy engine).
+
+    Frozen when legacy_engine_enabled is False — returns immediately with
+    no LLM calls, no screener work, no trades.
+    """
+    if not settings.legacy_engine_enabled:
+        return {"status": "legacy frozen"}
     results = await run_analysis_cycle(force=True)
     return {
         "message": "Analysis cycle completed",

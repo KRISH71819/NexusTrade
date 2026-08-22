@@ -32,11 +32,11 @@ export default function TradingWorkspace() {
       const newSym = prompt("Enter Symbol:");
       if (newSym) {
         loadTicker(newSym.toUpperCase());
-        navigate("/");
+        navigate("/chart");
       }
     } else {
       loadTicker(sym);
-      navigate("/");
+      navigate("/chart");
     }
   };
 
@@ -47,7 +47,9 @@ export default function TradingWorkspace() {
   }, [selectedTicker]);
 
   const location = useLocation();
-  const isInnerPage = location.pathname !== '/' && location.pathname !== '/analysis';
+  // Chart workspace lives at /chart and /analysis ("/" is now System B)
+  const isChartView = location.pathname === '/chart' || location.pathname === '/analysis';
+  const isInnerPage = !isChartView;
 
   return (
     <div className="trading-app-shell">

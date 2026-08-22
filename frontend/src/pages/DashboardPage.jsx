@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -11,6 +11,7 @@ import {
   TrendingUp,
   Wallet,
   Globe,
+  Snowflake,
 } from "lucide-react";
 import { gsap } from "gsap";
 import { createChart } from "lightweight-charts";
@@ -21,6 +22,7 @@ import MetricCard from "../components/MetricCard";
 import ActionPill from "../components/ActionPill";
 import EmptyState from "../components/EmptyState";
 import PriceTicker from "../components/PriceTicker";
+import { api } from "../api";
 import { money, percent, dateTime, compactMoney, signedClass } from "../format";
 
 export default function DashboardPage() {
@@ -32,6 +34,14 @@ export default function DashboardPage() {
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
   const contentRef = useRef(null);
+  const [legacyFrozen, setLegacyFrozen] = useState(true);
+
+  // Legacy engine freeze state drives the FROZEN banner.
+  useEffect(() => {
+    api.health()
+      .then((h) => setLegacyFrozen(!h?.legacy_engine_enabled))
+      .catch(() => {});
+  }, []);
 
   const monthlyPnl = useMemo(() => {
     const currentValue = pnlData.total_portfolio_value || portfolio.total_value || 1000000;
@@ -171,7 +181,7 @@ export default function DashboardPage() {
   if (status.loading) {
     return (
       <>
-        <Topbar title="Dashboard" subtitle="Loading..." />
+        <Topbar title="Legacy (frozen) — System A" subtitle="Loading..." />
         <div>
           <div className="metrics-grid">
             {[1, 2, 3, 4, 5, 6].map((i) => (
@@ -189,7 +199,30 @@ export default function DashboardPage() {
 
   return (
     <>
-      <Topbar title="Dashboard" subtitle="Portfolio overview & market intelligence" />
+      <Topbar title="Legacy (frozen) — System A" subtitle="Old LLM engine — hourly analysis retired; risk checks remain active" />
+
+      {/* FROZEN banner */}
+      {legacyFrozen && (
+        <div
+          className="notice"
+          style={{
+            marginBottom: "16px",
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            background: "rgba(59, 130, 246, 0.08)",
+            border: "1px solid rgba(59, 130, 246, 0.35)",
+            color: "#93c5fd",
+          }}
+        >
+          <Snowflake size={16} />
+          <span>
+            <strong>FROZEN</strong> — the legacy hourly LLM brain is disabled. The
+            30-minute rule-based risk check still protects these positions.
+          </span>
+        </div>
+      )}
+
       <PriceTicker prices={realtime.prices} holdings={holdings} />
       <div ref={contentRef}>
         {/* Status Notice */}

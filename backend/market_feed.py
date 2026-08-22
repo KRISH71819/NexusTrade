@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Callable
 
@@ -41,6 +41,15 @@ _feed_running = False
 _feed_connected = False
 _last_tick_time: float = 0
 _subscribed_tickers: Set[str] = set()
+
+# ── Reconnect circuit breaker (Section 1) ────────────────────────────────────
+# The dhanhq library auto-reconnects internally and re-fires on_connect; when
+# that loop runs hot it hammers the Dhan API. We count reconnects over a
+# rolling hour and open a breaker past the threshold. Wrapper-level retries
+# (after feed.run() exits entirely) back off exponentially.
+_reconnect_events: deque = deque()      # monotonic timestamps of auto-reconnects
+_circuit_breaker_open: bool = False
+_last_connect_mono: float = 0.0
 
 # ── Pending tick buffer (batched for frontend broadcast) ─────────────────────
 _tick_buffer: List[dict] = []
@@ -95,6 +104,7 @@ def get_feed_status() -> dict:
         "subscribed_count": len(_subscribed_tickers),
         "cached_prices": len(_price_cache),
         "ws_clients": len(_ws_clients),
+        "circuit_breaker_open": _circuit_breaker_open,
     }
 
 
@@ -286,36 +296,69 @@ def _process_tick(tick_data: dict):
         logger.debug(f"Tick processing error: {e}")
 
 
+def _prune_and_count_reconnects() -> int:
+    """Prune reconnect timestamps older than one rolling hour; return count."""
+    now = time.monotonic()
+    hour_ago = now - 3600.0
+    while _reconnect_events and _reconnect_events[0] < hour_ago:
+        _reconnect_events.popleft()
+    return len(_reconnect_events)
+
+
+def _open_circuit_breaker(reason: str) -> None:
+    """Open the breaker and stop the feed thread loop. Idempotent."""
+    global _circuit_breaker_open
+    if _circuit_breaker_open:
+        return
+    _circuit_breaker_open = True
+    logger.warning(
+        f"WebSocket circuit breaker OPEN ({reason}) — feed stopped until restart"
+    )
+    instance = _feed_instance
+    if instance is not None:
+        try:
+            instance.disconnect()
+        except Exception:
+            pass
+
+
 def _run_dhan_feed():
     """
     Run the Dhan MarketFeed WebSocket in a background thread.
-    This is blocking — runs until stop is requested.
+
+    Owns the connection lifecycle (NOT dhan_client):
+      - Counts library-level auto-reconnects over a rolling hour; more than
+        settings.ws_max_reconnects_per_hour opens a circuit breaker that stops
+        the feed.
+      - When feed.run() exits entirely, retries with exponential backoff
+        (settings.ws_backoff_start_s doubling, capped at settings.ws_backoff_cap_s).
+    This is blocking — runs until stop is requested or the breaker opens.
     """
-    global _feed_instance, _feed_connected, _feed_running
-    
+    global _feed_instance, _feed_connected, _feed_running, _last_connect_mono
+
     try:
         from dhanhq import MarketFeed, DhanContext
         from dhan_client import dhan_client
-        
+
         client_id = dhan_client._effective_client_id
         access_token = dhan_client._effective_access_token
-        
+
         if not client_id or not access_token:
             logger.warning("Dhan credentials not available for MarketFeed")
             _feed_running = False
             return
-        
+
         instruments = _build_subscription_list()
         if not instruments:
             logger.warning("No instruments to subscribe to")
             _feed_running = False
             return
-        
+
         logger.info(
             f"Starting Dhan MarketFeed WebSocket "
             f"(client={client_id}, instruments={len(instruments)})"
         )
-        
+
         # Initialize MarketFeed using DhanContext
         context = DhanContext(client_id, access_token)
         feed = MarketFeed(
@@ -324,39 +367,76 @@ def _run_dhan_feed():
             version='v2'
         )
         _feed_instance = feed
-        
+
         def on_connect(instance):
             # dhanhq re-fires on_connect on EVERY internal auto-reconnect
             # (marketfeed.py _run_async -> connect), which happens frequently.
-            # Guard so we only log/set state on a genuine (re)connect, and queue
-            # the resubscribe instead of logging thousands of "CONNECTED" lines.
-            global _feed_connected
+            # Guard so we only log/set state on a genuine (re)connect, count
+            # reconnects for the circuit breaker, and queue the resubscribe
+            # instead of logging thousands of "CONNECTED" lines.
+            global _feed_connected, _last_connect_mono
             already_connected = _feed_connected
             _feed_connected = True
+            _last_connect_mono = time.monotonic()
             if already_connected:
-                logger.debug("Dhan MarketFeed re-connected (auto-reconnect)")
+                _reconnect_events.append(time.monotonic())
+                count = _prune_and_count_reconnects()
+                if count > settings.ws_max_reconnects_per_hour:
+                    _open_circuit_breaker(
+                        f"{count} reconnects in the last hour "
+                        f"(max {settings.ws_max_reconnects_per_hour})"
+                    )
+                else:
+                    logger.debug("Dhan MarketFeed re-connected (auto-reconnect)")
             else:
                 logger.info(
                     f"✓ Dhan MarketFeed CONNECTED — "
                     f"streaming {len(instruments)} instruments"
                 )
-        
+
         def on_message(instance, message):
             if isinstance(message, dict):
                 _process_tick(message)
-        
+
         def on_close(instance):
             global _feed_connected
             _feed_connected = False
             logger.warning("Dhan MarketFeed disconnected")
-        
+
         feed.on_connect = on_connect
         feed.on_message = on_message
         feed.on_close = on_close
-        
-        # This blocks until the connection is closed
-        feed.run()
-        
+
+        # Supervisor loop — exponential backoff between full disconnections.
+        backoff_start = settings.ws_backoff_start_s
+        backoff_cap = settings.ws_backoff_cap_s
+        attempt = 0
+        while _feed_running and not _circuit_breaker_open:
+            connect_mono = _last_connect_mono
+            try:
+                # Blocks until the connection closes
+                feed.run()
+            except Exception as e:
+                logger.error(f"Dhan MarketFeed error: {e}")
+
+            if not _feed_running or _circuit_breaker_open:
+                break
+
+            # Reset backoff after a healthy stretch (>5 min connected)
+            uptime = time.monotonic() - connect_mono if connect_mono else 0.0
+            if uptime > 300.0:
+                attempt = 0
+
+            delay = min(backoff_start * (2 ** attempt), backoff_cap)
+            attempt += 1
+            logger.warning(f"MarketFeed exited — wrapper retry #{attempt} in {delay:.0f}s")
+
+            # Sleep in 1s slices so stop_market_feed / breaker can interrupt
+            slept = 0.0
+            while slept < delay and _feed_running and not _circuit_breaker_open:
+                time.sleep(min(1.0, delay - slept))
+                slept += min(1.0, delay - slept)
+
     except ImportError:
         logger.error("dhanhq package not installed — real-time feed unavailable")
     except Exception as e:
@@ -580,9 +660,17 @@ async def start_market_feed():
     """
     Start the Dhan MarketFeed WebSocket in a background thread,
     plus the async broadcast loop.
+    Skipped entirely while the legacy engine is frozen — risk checks fall
+    back to yfinance polling (wired in scheduler.run_risk_check).
     """
     global _feed_thread, _feed_running
-    
+
+    if not settings.legacy_engine_enabled:
+        logger.info(
+            "WebSocket disabled (legacy frozen) — risk checks use polling"
+        )
+        return
+
     if not settings.realtime_enabled:
         logger.info("Real-time feed disabled in config")
         return
@@ -613,19 +701,21 @@ async def start_market_feed():
 
 
 async def stop_market_feed():
-    """Stop the market feed and clean up."""
-    global _feed_running, _feed_connected, _feed_instance
-    
+    """Stop the market feed and clean up. Resets the circuit breaker."""
+    global _feed_running, _feed_connected, _feed_instance, _circuit_breaker_open
+
     _feed_running = False
     _feed_connected = False
-    
+    _circuit_breaker_open = False
+    _reconnect_events.clear()
+
     if _feed_instance:
         try:
             _feed_instance.disconnect()
         except Exception:
             pass
         _feed_instance = None
-    
+
     logger.info("Real-time market feed stopped")
 
 

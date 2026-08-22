@@ -96,6 +96,11 @@ export const api = {
       body: JSON.stringify({ mode }),
     }),
   getLLMUsage: () => request("/api/llm-config/usage"),
+
+  // ── System B — Meta Research Portfolio ────────────────────────────────
+  metaStatus: () => request("/api/meta/status"),
+  metaSummary: () => request("/api/meta/summary"),
+  metaEquity: () => request("/api/meta/equity"),
 };
 
 /**

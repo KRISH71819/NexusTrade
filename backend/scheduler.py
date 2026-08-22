@@ -1,11 +1,14 @@
 """
 Scheduler — orchestrates the autonomous trading pipeline.
 
-Schedule:
-  - Hourly (9:15-15:30 IST): Full analysis cycle
-  - Every 30 minutes: Risk checks (stop-loss / trailing stop scans)
-  - 9:00 AM: Pre-market news scan
-  - 3:35 PM: Post-market portfolio snapshot
+Schedule (IST):
+  - Hourly (9:15-15:30): Legacy analysis cycle [ONLY if legacy_engine_enabled]
+  - Every 30 minutes: Risk checks (stop-loss / trailing stop scans) — always on
+  - 15:32 (mon-fri): Meta portfolio mark-to-market
+  - 15:40 (mon-fri): Meta rebalance (60d cadence enforced internally)
+  - 3:35 PM: Post-market daily report (META-primary)
+  - Sat 10:00: Scoped alpha evolution batch [ONLY if evolution_auto_enabled]
+  - Sun 18:00: Weekly Telegram summary
 """
 
 import asyncio
@@ -84,6 +87,13 @@ async def run_analysis_cycle(force: bool = False):
     gets full LLM structured analysis for maximum stock selection quality.
     """
     global _analysis_running, _cancel_requested, _current_cycle_id
+
+    # ── Legacy freeze (Section 1) ──────────────────────────────────────
+    # When the legacy engine is disabled this job must perform ZERO LLM
+    # calls, zero screener work and zero batch-optimizer trades.
+    if not settings.legacy_engine_enabled:
+        logger.info("ANALYSIS CYCLE SKIPPED (legacy engine frozen)")
+        return {"status": "legacy_frozen"}
 
     if _analysis_running:
         if force:
@@ -1265,11 +1275,61 @@ def start_scheduler():
             max_instances=1,
         )
 
+    # ── Saturday scoped evolution batch (Section 3) ───────────────────
+    # Registered ONLY if the auto switch is on. The manual
+    # POST /api/research/trigger endpoint works regardless of this flag.
+    if settings.evolution_auto_enabled:
+        async def _saturday_evolution_job():
+            try:
+                from evolution_driver import run_scoped_evolution
+                res = await run_scoped_evolution()
+                logger.info(f"SATURDAY EVOLUTION: {res}")
+            except Exception as e:
+                logger.error(f"Saturday evolution batch failed: {e}", exc_info=True)
+
+        _scheduler.add_job(
+            _saturday_evolution_job,
+            CronTrigger(
+                day_of_week="sat",
+                hour="10",
+                minute="0",
+                timezone=settings.scheduler_timezone,
+            ),
+            id="saturday_evolution",
+            name="Scoped Alpha Evolution Batch (research only)",
+            max_instances=1,
+        )
+
+    # ── Sunday weekly Telegram summary (Section 3) ──────────────────────
+    async def _sunday_weekly_summary_job():
+        try:
+            from reporting import build_weekly_summary
+            summary = await build_weekly_summary()
+            logger.info("\n" + summary)
+        except Exception as e:
+            logger.error(f"Weekly summary failed: {e}", exc_info=True)
+
+    _scheduler.add_job(
+        _sunday_weekly_summary_job,
+        CronTrigger(
+            day_of_week="sun",
+            hour="18",
+            minute="0",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="sunday_weekly_summary",
+        name="Weekly Telegram Summary (meta + legacy + research)",
+        max_instances=1,
+    )
+
     _scheduler.start()
+    legacy_state = "ENABLED" if settings.legacy_engine_enabled else "FROZEN"
     logger.info(
-        f"Scheduler started — Analysis hourly {settings.market_open_hour}:15-"
+        f"Scheduler started (legacy={legacy_state}) — "
+        f"Analysis hourly {settings.market_open_hour}:15-"
         f"{settings.market_close_hour}:15 IST, Risk checks every 30min, "
-        f"Daily report 15:35 IST"
+        f"Daily report 15:35 IST, Meta MTM/rebalance 15:32/15:40 IST, "
+        f"Sunday summary 18:00 IST"
     )
 
     return _scheduler
@@ -1279,6 +1339,10 @@ def stop_scheduler():
     """Gracefully shut down the scheduler."""
     global _scheduler
     if _scheduler:
-        _scheduler.shutdown(wait=False)
+        try:
+            _scheduler.shutdown(wait=False)
+        except Exception as e:
+            # Already-stopped / dead-loop schedulers must not block shutdown.
+            logger.warning(f"Scheduler shutdown notice: {e}")
         _scheduler = None
         logger.info("Scheduler stopped")

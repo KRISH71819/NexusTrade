@@ -164,13 +164,22 @@ class Settings(BaseSettings):
     alpha_gate_dd_mode: str = "relative"   # "relative" to buy&hold, or "absolute"
     alpha_gate_dd_relative: float = 0.75   # alpha maxDD must be <= 75% of bench maxDD
 
+    # ── Alpha Evolution scoped batch (Section 3) ────────────────────────
+    # Runs the generate -> critic -> sandbox -> hall_of_fame pipeline with hard
+    # limits. Scheduled Saturday job fires ONLY if evolution_auto_enabled is
+    # True; the manual POST /api/research/trigger endpoint works regardless.
+    # Writes ONLY to alpha_registry / hall_of_fame — never to either book.
+    evolution_auto_enabled: bool = False   # Sat 10:00 IST auto-batch switch
+    evolution_max_candidates: int = 6      # hard cap per research batch
+    evolution_time_cap_min: int = 50       # wall-clock cap per batch (minutes)
+
     # ── Alpha Sandbox turnover control (Phase 5) ────────────────────────
     alpha_default_cadence: int = 5          # re-decide positions every N bars (weekly)
     alpha_default_min_hold: int = 5         # once long, hold at least N bars
     alpha_max_annual_turnover: float = 24.0 # gate: deployed turnover <= 24x/yr
 
     # ── Meta Research Portfolio — validated config (Phase 12) ─────────
-    meta_portfolio_enabled: bool = False        # master switch (default OFF)
+    meta_portfolio_enabled: bool = True         # master switch (System B active)
     meta_signal_expr: str = "close / sma(close, 200) - 1"  # trend_200 cross-sectional rank
     meta_top_n: int = 25
     meta_rebalance_days: int = 60
@@ -218,6 +227,13 @@ class Settings(BaseSettings):
     # ── Trading Mode ─────────────────────────────────────────────────
     trading_mode: str = "paper"  # "paper" or "live"
 
+    # ── Legacy Engine (System A) freeze switch ───────────────────────
+    # When False: hourly LLM analysis cycle, manual analyze trigger and the
+    # Dhan WebSocket feed are skipped. The 30-min rule-based risk check stays
+    # ON to protect legacy positions (yfinance polling fallback). System B
+    # (meta portfolio) is unaffected by this flag.
+    legacy_engine_enabled: bool = False
+
     # ── Global Kill Switch ───────────────────────────────────────────
     kill_switch_enabled: bool = False  # When True: no new BUYs, only SELLs
 
@@ -226,6 +242,15 @@ class Settings(BaseSettings):
     realtime_candle_intervals: List[str] = ["1m", "5m", "15m"]  # Candle intervals built from ticks
     realtime_tick_batch_ms: int = 250          # Batch frontend WS updates every 250ms
     realtime_subscribe_watchlist: bool = True  # Subscribe to entire NIFTY 500 (not just held stocks)
+
+    # ── WebSocket reconnect circuit breaker (Section 1) ────────────────
+    # Guards against the dhanhq library's aggressive internal auto-reconnect
+    # loop. More than ws_max_reconnects_per_hour reconnects within one rolling
+    # hour opens the breaker and stops the feed. Wrapper-level retries after a
+    # full disconnect use exponential backoff capped at ws_reconnect_cap_s.
+    ws_max_reconnects_per_hour: int = 5        # breaker threshold (rolling 60 min)
+    ws_backoff_start_s: float = 5.0            # first wrapper retry delay
+    ws_backoff_cap_s: float = 60.0             # max wrapper retry delay
 
     # ── Scheduler ────────────────────────────────────────────────────
     scheduler_timezone: str = "Asia/Kolkata"
