@@ -44,4 +44,6 @@ async def research_status(run_id: str | None = None):
         return {"status": "no_runs_yet"}
     tail = snap.get("log_tail")
     snap["log_tail"] = list(tail) if hasattr(tail, "__iter__") else []
+    if "candidates" not in snap:
+        snap["candidates"] = []
     return snap

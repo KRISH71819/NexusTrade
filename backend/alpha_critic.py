@@ -74,10 +74,110 @@ def _parse_critique(raw: str) -> dict:
             "fatal_flaw": str(data.get("fatal_flaw", ""))[:300]}
 
 
+def check_structural_rejections(expr: str) -> dict | None:
+    """
+    Pre-sandbox structural rejections (Section 4 A & B) — fires BEFORE LLM or sandbox:
+    1. Multi-conjunction: 3+ AND-conjoined threshold conditions -> REJECT ('selectivity risk')
+    2. Fast-cross: lookback < 60 days in entry / fast oscillator -> REJECT ('structural turnover too high')
+    """
+    if not expr or not isinstance(expr, str):
+        return None
+
+    import ast
+
+    # ── A. Multi-conjunction detector (3+ AND-conjoined conditions) ──────────
+    try:
+        tree = ast.parse(expr, mode="eval")
+
+        def count_and_nodes(node):
+            if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+                return sum(count_and_nodes(v) for v in node.values)
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.And)):
+                return count_and_nodes(node.left) + count_and_nodes(node.right)
+            return 1
+
+        if count_and_nodes(tree.body) >= 3:
+            return {
+                "verdict": "REJECT",
+                "reasons": ["selectivity risk: 3+ conjunctions never fire"],
+                "fatal_flaw": "selectivity risk: 3+ conjunctions never fire",
+            }
+    except Exception:
+        pass
+
+    and_tokens = re.split(r'\s+and\s+|\s*&\s*', expr, flags=re.IGNORECASE)
+    if len(and_tokens) >= 3:
+        return {
+            "verdict": "REJECT",
+            "reasons": ["selectivity risk: 3+ conjunctions never fire"],
+            "fatal_flaw": "selectivity risk: 3+ conjunctions never fire",
+        }
+
+    # ── B. Fast-cross detector (lookback < 60 days / fast oscillator) ─────────
+    fast_funcs = {"macd", "macd_hist", "macd_cross"}
+    try:
+        tree = ast.parse(expr, mode="eval")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func_name = ""
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+
+                if func_name.lower() in fast_funcs:
+                    return {
+                        "verdict": "REJECT",
+                        "reasons": ["structural turnover too high — fast oscillator"],
+                        "fatal_flaw": "structural turnover too high — fast oscillator",
+                    }
+
+                # Check integer lookback arguments (< 60)
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)):
+                        if 0 < arg.value < 60:
+                            return {
+                                "verdict": "REJECT",
+                                "reasons": ["structural turnover too high — fast oscillator"],
+                                "fatal_flaw": "structural turnover too high — fast oscillator",
+                            }
+    except Exception:
+        pass
+
+    if re.search(r'\b(macd|macd_hist|macd_cross)\b', expr, flags=re.IGNORECASE):
+        return {
+            "verdict": "REJECT",
+            "reasons": ["structural turnover too high — fast oscillator"],
+            "fatal_flaw": "structural turnover too high — fast oscillator",
+        }
+
+    func_calls = re.findall(
+        r'\b(sma|ema|std|delta|zscore|rank|rsi|volume_ratio|macd_cross)\s*\([^)]*\)',
+        expr, flags=re.IGNORECASE
+    )
+    for call_str in func_calls:
+        nums = [int(n) for n in re.findall(r'\b\d+\b', call_str)]
+        if any(0 < n < 60 for n in nums):
+            return {
+                "verdict": "REJECT",
+                "reasons": ["structural turnover too high — fast oscillator"],
+                "fatal_flaw": "structural turnover too high — fast oscillator",
+            }
+
+    return None
+
+
 def critique_candidate(candidate: dict) -> dict:
-    """Run the critic LLM over one candidate. Fail-closed on any failure."""
+    """Run the critic over one candidate. Applies structural checks first, then LLM. Fail-closed on any failure."""
+    expr = candidate.get("expression", "")
+    structural = check_structural_rejections(expr)
+    if structural:
+        logger.info(f"CRITIC {structural['verdict']} (structural pre-check) for {candidate.get('name', '?')}: "
+                    f"{structural['fatal_flaw']}")
+        return structural
+
     prompt = _CRITIC_PROMPT.format(
-        expr=candidate.get("expression", ""),
+        expr=expr,
         hypothesis=candidate.get("hypothesis", ""),
     )
     time.sleep(2.1)  # rate-limit spacing after the generator call

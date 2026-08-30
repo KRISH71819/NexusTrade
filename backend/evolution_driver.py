@@ -65,7 +65,12 @@ def get_run_status(run_id: str | None = None) -> dict:
                 rec = _runs[_current_run_id]
             elif _runs:
                 rec = max(_runs.values(), key=lambda r: r.get("started_ts", ""))
-        return dict(rec) if rec else {}
+        if not rec:
+            return {}
+        snap = dict(rec)
+        if "candidates" in snap:
+            snap["candidates"] = list(snap["candidates"])
+        return snap
 
 
 def is_running() -> bool:
@@ -109,6 +114,7 @@ async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> di
         cands = generate_candidates(count, memory)  # blocking LLM call (isolated thread)
         proposed = len(cands)
         record["proposed"] = proposed
+        record["candidates"] = []
         _log_line(record, f"generator proposed {proposed} candidate(s)")
 
         tested = 0
@@ -120,19 +126,47 @@ async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> di
                 break
             name = cand.get("name", "?")
             try:
-                metrics = await process_candidate(cand, panel, bench_dd)
+                cand_res = await process_candidate(cand, panel, bench_dd)
                 tested += 1
                 record["tested"] = tested
-                if metrics:
-                    _log_line(record,
-                              f"candidate '{name}': sharpe={metrics.get('sharpe')} "
-                              f"maxDD={metrics.get('max_dd_pct')}% "
-                              f"turnover={metrics.get('ann_turnover')}x/yr")
+                if cand_res:
+                    record["candidates"].append(cand_res)
+                    met = cand_res.get("metrics") or {}
+                    sh = met.get("sharpe")
+                    if sh is not None:
+                        _log_line(record,
+                                  f"candidate '{name}': sharpe={sh} "
+                                  f"maxDD={met.get('max_dd_pct')}% "
+                                  f"turnover={met.get('ann_turnover')}x/yr")
+                    else:
+                        _log_line(record, f"candidate '{name}': rejected ({cand_res.get('verdict', 'REJECT')})")
                 else:
+                    record["candidates"].append({
+                        "name": name,
+                        "hypothesis": cand.get("hypothesis", ""),
+                        "expression": cand.get("expression", ""),
+                        "metrics": {
+                            "sharpe": None, "max_dd_pct": None, "ann_turnover": None,
+                            "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None
+                        },
+                        "gates": {"sharpe": False, "max_dd": False, "stability": False, "turnover": False, "all": False},
+                        "verdict": "REJECT",
+                    })
                     _log_line(record, f"candidate '{name}': rejected pre/post-backtest")
             except Exception as e:  # one bad candidate must never kill the batch
                 tested += 1
                 record["tested"] = tested
+                record["candidates"].append({
+                    "name": name,
+                    "hypothesis": cand.get("hypothesis", ""),
+                    "expression": cand.get("expression", ""),
+                    "metrics": {
+                        "sharpe": None, "max_dd_pct": None, "ann_turnover": None,
+                        "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None
+                    },
+                    "gates": {"sharpe": False, "max_dd": False, "stability": False, "turnover": False, "all": False},
+                    "verdict": "REJECT",
+                })
                 _log_line(record, f"candidate '{name}' errored: {e}")
 
         # Gate-pass tally from the registry (docs written during THIS batch).
@@ -159,6 +193,7 @@ async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> di
             "passed": record["passed"],
             "hof_promoted": record["hof_promoted"],
             "hof_active": record["hof_active"],
+            "candidates": record["candidates"],
         }
     finally:
         await close_db()
@@ -241,6 +276,7 @@ async def run_scoped_evolution(count: Optional[int] = None,
             "hof_active": 0,
             "elapsed_s": None,
             "error": None,
+            "candidates": [],
             "log_tail": deque(maxlen=_LOG_TAIL_LEN),
         }
         _runs[rid] = record
@@ -258,7 +294,7 @@ async def run_scoped_evolution(count: Optional[int] = None,
             timeout=time_cap_s + 30.0,  # small grace for cleanup/close
         )
         record["status"] = summary.get("status", "completed")
-        for k in ("proposed", "tested", "passed", "hof_promoted", "hof_active"):
+        for k in ("proposed", "tested", "passed", "hof_promoted", "hof_active", "candidates"):
             if k in summary:
                 record[k] = summary[k]
         return {"run_id": rid, **summary}

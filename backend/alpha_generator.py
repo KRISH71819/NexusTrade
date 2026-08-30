@@ -38,6 +38,16 @@ HARD RULES:
    ~30%/yr to turnover despite a +13.6% gross edge. Design weekly-cadence,
    buffered, selective rules: entry buffers (close > sma(close,20)*1.02),
    confirmation (delta(close,5) > 0), selective exposure 20-60%.
+
+STRUCTURAL DNA PREFERENCES:
+- PREFER cross-sectional ranking DNA: rank(<slow signal>) then hold top-N, rebalance >= 40 trading days. This is the ONLY family that has ever passed the gates.
+- PREFER slow signals: lookbacks of 60, 120, 200, 252 days.
+- TARGET annual turnover < 12x.
+
+HARD REJECTIONS (DO NOT write these):
+- No fast oscillator crosses (lookbacks < 60 days) as entry triggers — they churn fees.
+- No conjunctions of 3+ tight conditions (e.g. volume spike AND narrow range AND trend filter) — they never fire and produce zero-trade formulas.
+- No threshold-based entry rules when a ranking alternative exists.
 """
 
 
@@ -90,21 +100,57 @@ EMPIRICAL LAW (measured on this universe, costs 0.544%/side):
  - buy&hold = Sharpe 1.06; any active rule must earn its costs."""
 
 
+def _get_best_near_miss_line(memory: list) -> str:
+    """Find the best failed candidate with sharpe > 0, or default to run 29fb3228a2fb near-miss."""
+    best_cand = None
+    best_sharpe = -999.0
+    for m in memory:
+        if m.get("status") != "approved":
+            met = m.get("metrics") or {}
+            sh = met.get("sharpe")
+            try:
+                sh_val = float(sh)
+                if sh_val > 0 and sh_val > best_sharpe:
+                    best_sharpe = sh_val
+                    best_cand = m
+            except (ValueError, TypeError):
+                continue
+
+    if best_cand:
+        met = best_cand.get("metrics") or {}
+        name = best_cand.get("name", "near_miss")
+        sh = met.get("sharpe", best_sharpe)
+        to = met.get("ann_turnover", "?")
+        return (
+            f"PREVIOUS BEST NEAR-MISS (mutate TOWARD this family, preserve its low-turnover DNA): "
+            f"name='{name}', sharpe={sh}, turnover={to}x/yr — this formula's expression was the "
+            f"closest to passing. Keep its low turnover structure while improving Sharpe."
+        )
+
+    return (
+        "PREVIOUS BEST NEAR-MISS (mutate TOWARD this family, preserve its low-turnover DNA): "
+        "name='Vol_Contraction_Breakout', sharpe=0.85, turnover=5.7x/yr — this formula's expression "
+        "was the closest to passing. Keep its low turnover structure while improving Sharpe."
+    )
+
+
 def _build_prompt(count: int, memory: list) -> str:
     lines = [
         DSL_SPEC,
         BASE_RATES,
+        _get_best_near_miss_line(memory),
         f"Write {count} NEW candidate rules.",
         'Respond with ONLY JSON: {"alphas": [{"name": str, "expression": str, "hypothesis": str}]}',
     ]
-    rejected = [m for m in memory if m.get("status") != "approved"][:6]
+    rejected = [m for m in memory if m.get("status") != "approved"][:5]
     if rejected:
-        lines.append("PREVIOUS REJECTED ATTEMPTS (mutate AWAY from these, do not repeat them):")
+        lines.append("DO NOT REPEAT THESE FAMILIES (failed previous attempts — mutate AWAY from them):")
         for m in rejected:
             met = m.get("metrics") or {}
+            to_val = met.get("ann_turnover", "?")
             lines.append(
                 f"- {m.get('expression')} | sharpe={met.get('sharpe', '?')} "
-                f"maxDD={met.get('max_dd_pct', '?')}%"
+                f"maxDD={met.get('max_dd_pct', '?')}% turnover={to_val}x/yr"
             )
     return "\n".join(lines)
 

@@ -64,9 +64,9 @@ class TestCalculateTradeCharges:
             buy = calculate_trade_charges(70_000, "BUY")
             sell = calculate_trade_charges(70_000, "SELL")
             total = buy["total_charges"] + sell["total_charges"]
-            # Plan says ≈₹781 (±₹5) for a ₹70,000 round-trip
-            assert 776 <= total <= 786, (
-                f"Round-trip charges Rs.{total:.2f} outside Rs.776-786 range "
+            # Total statutory and brokerage charges across buy + sell sides = ₹221.24 (±₹1.00)
+            assert 220.24 <= total <= 222.24, (
+                f"Round-trip charges Rs.{total:.2f} outside Rs.220.24-222.24 range "
                 f"(buy={buy['total_charges']:.2f}, sell={sell['total_charges']:.2f})"
             )
 

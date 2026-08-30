@@ -28,6 +28,20 @@ async def save_alpha_result(expression, name, info, metrics, fold_sharpes, gates
         "gates": gates,
         "status": "approved" if gates.get("all") else "rejected",
     }
+    # Zero-trade tagging (post-sandbox)
+    met = metrics or {}
+    try:
+        t_over = float(met.get("ann_turnover", 0.0) or 0.0)
+        m_dd = float(met.get("max_dd_pct", 0.0) or 0.0)
+        a_ret = float(met.get("ann_return_pct", 0.0) or 0.0)
+        if t_over == 0.0 and m_dd == 0.0 and a_ret == 0.0:
+            doc["label"] = "zero_trade_family"
+            doc["zero_trade_family"] = True
+            if isinstance(doc.get("info"), dict):
+                doc["info"]["label"] = "zero_trade_family"
+    except Exception:
+        pass
+
     await _coll().insert_one(doc)
     logger.info(f"alpha_registry: saved '{name}' status={doc['status']}")
     return doc

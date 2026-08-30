@@ -13,6 +13,7 @@ System B switchover freeze tests (Section 4.2).
 import asyncio
 import os
 import sys
+from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -196,12 +197,13 @@ async def test_weekly_summary_contains_meta_numbers():
 
     meta_coll = _fake_coll(find_docs=[], one_doc=meta_doc)
     eq_coll = _fake_coll(find_docs=equity_docs, one_doc=None)
+    recent_promo = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 
     with patch("database.get_meta_portfolio_collection", return_value=meta_coll), \
          patch("database.get_meta_equity_collection", return_value=eq_coll), \
          patch("alpha_sandbox.hall_of_fame.list_hall_of_fame",
                new_callable=AsyncMock, return_value=[
-                   {"name": "hof_alpha_1", "promoted_at": "2026-08-21T09:00:00"},
+                   {"name": "hof_alpha_1", "promoted_at": recent_promo},
                ]), \
          patch("llm_engine.get_daily_budget_status",
                return_value={"calls_today": 7, "daily_limit": 1250}), \

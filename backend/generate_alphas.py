@@ -42,18 +42,47 @@ DEFAULT_TICKERS = [
 DEFAULT_START = "2010-01-01"
 
 
-async def process_candidate(cand: dict, panel: dict, bench_dd: float):
-    """validate -> critique/revise loop -> backtest -> save. Returns metrics or None."""
-    ok, err = validate_expression(cand["expression"])
+async def process_candidate(cand: dict, panel: dict, bench_dd: float) -> dict | None:
+    """validate -> critique/revise loop -> backtest -> save. Returns candidate result dict or None."""
+    name = cand.get("name", "llm_alpha")
+    hypothesis = cand.get("hypothesis", "")
+    expression = cand.get("expression", "")
+
+    empty_metrics = {
+        "sharpe": None,
+        "max_dd_pct": None,
+        "ann_turnover": None,
+        "fold_sharpes": [],
+        "ann_return_pct": None,
+        "ann_vol_pct": None,
+    }
+    empty_gates = {
+        "sharpe": False,
+        "max_dd": False,
+        "stability": False,
+        "turnover": False,
+        "all": False,
+    }
+
+    ok, err = validate_expression(expression)
     if not ok:
         print(f"  INVALID DSL — {err}")
-        return None
+        return {
+            "name": name,
+            "hypothesis": hypothesis,
+            "expression": expression,
+            "metrics": empty_metrics,
+            "gates": empty_gates,
+            "verdict": "REJECT",
+        }
 
     critique_trail = []
+    final_verdict = "REJECT"
     for step in range(settings.alpha_max_revisions + 1):
         critique = critique_candidate(cand)
         critique_trail.append(critique)
         verdict = critique["verdict"]
+        final_verdict = verdict
         print(f"  CRITIC    : {verdict}"
               + (f" — {critique['fatal_flaw'] or '; '.join(critique['reasons'])}"
                  if verdict != "APPROVE" else ""))
@@ -62,23 +91,47 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float):
         if verdict == "REJECT" or step == settings.alpha_max_revisions:
             await registry.save_alpha_result(
                 cand["expression"], f"llm_{cand['name']}",
-                {"hypothesis": cand["hypothesis"], "critic": critique_trail,
+                {"hypothesis": cand.get("hypothesis", ""), "critic": critique_trail,
                  "bench_max_dd_pct": bench_dd},
                 {"days": 0}, [],
                 {"sharpe": False, "max_dd": False, "stability": False, "all": False},
                 source="llm",
             )
-            return None
+            return {
+                "name": cand.get("name", name),
+                "hypothesis": cand.get("hypothesis", hypothesis),
+                "expression": cand.get("expression", expression),
+                "metrics": empty_metrics,
+                "gates": empty_gates,
+                "verdict": verdict,
+            }
         revised = revise_candidate(cand, critique)
         if revised is None:
             print("  REVISION FAILED (no parseable output)")
-            return None
+            return {
+                "name": cand.get("name", name),
+                "hypothesis": cand.get("hypothesis", hypothesis),
+                "expression": cand.get("expression", expression),
+                "metrics": empty_metrics,
+                "gates": empty_gates,
+                "verdict": "REVISE",
+            }
         ok, err = validate_expression(revised["expression"])
         if not ok:
             print(f"  REVISED INVALID DSL — {err}")
-            return None
+            return {
+                "name": revised.get("name", name),
+                "hypothesis": revised.get("hypothesis", hypothesis),
+                "expression": revised.get("expression", expression),
+                "metrics": empty_metrics,
+                "gates": empty_gates,
+                "verdict": "REJECT",
+            }
         print(f"  REVISED   : {revised['expression']}")
         cand = revised
+        expression = cand.get("expression", expression)
+        name = cand.get("name", name)
+        hypothesis = cand.get("hypothesis", hypothesis)
 
     daily_net, info = backtest_signal(
         panel, cand["expression"],
@@ -87,7 +140,14 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float):
     )
     if info.get("tickers_used", 0) == 0:
         print("  no usable tickers")
-        return None
+        return {
+            "name": name,
+            "hypothesis": hypothesis,
+            "expression": expression,
+            "metrics": empty_metrics,
+            "gates": empty_gates,
+            "verdict": final_verdict,
+        }
     metrics = compute_metrics(daily_net)
     metrics["ann_turnover"] = info.get("ann_turnover", 0.0)
     folds = walk_forward_sharpes(daily_net)
@@ -97,7 +157,14 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float):
           f"exposure: {info['exposure_pct']}%")
     if metrics.get("status") == "insufficient_data":
         print(f"  NOT ENOUGH DATA ({metrics.get('days')} days)")
-        return None
+        return {
+            "name": name,
+            "hypothesis": hypothesis,
+            "expression": expression,
+            "metrics": empty_metrics,
+            "gates": empty_gates,
+            "verdict": final_verdict,
+        }
     print(f"  ann_return: {metrics['ann_return_pct']:+.2f}% | vol: {metrics['ann_vol_pct']:.2f}% | "
           f"Sharpe(net): {metrics['sharpe']:.2f}")
     print(f"  maxDD     : {metrics['max_dd_pct']:.2f}% | win(active): {metrics['win_rate_pct']:.1f}%")
@@ -112,7 +179,23 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float):
          "bench_max_dd_pct": bench_dd, **info},
         metrics, folds, gates, source="llm",
     )
-    return metrics
+
+    candidate_metrics = {
+        "sharpe": metrics.get("sharpe"),
+        "max_dd_pct": metrics.get("max_dd_pct"),
+        "ann_turnover": metrics.get("ann_turnover"),
+        "fold_sharpes": folds,
+        "ann_return_pct": metrics.get("ann_return_pct"),
+        "ann_vol_pct": metrics.get("ann_vol_pct"),
+    }
+    return {
+        "name": name,
+        "hypothesis": hypothesis,
+        "expression": expression,
+        "metrics": candidate_metrics,
+        "gates": gates,
+        "verdict": final_verdict,
+    }
 
 
 async def main():
@@ -154,8 +237,9 @@ async def main():
             print(f"  hypothesis: {cand['hypothesis'] or '(none)'}")
             print(f"  expr      : {cand['expression']}")
             m = await process_candidate(cand, panel, bench["max_dd_pct"])
-            if m and m.get("sharpe") is not None and (best is None or m["sharpe"] > best):
-                best = m["sharpe"]
+            sh = m.get("metrics", {}).get("sharpe") if m else None
+            if sh is not None and (best is None or sh > best):
+                best = sh
         print(f"\nGeneration {gen} best Sharpe: {best if best is not None else 'n/a'}")
 
     hof = await hall_of_fame.refresh_hall_of_fame()
