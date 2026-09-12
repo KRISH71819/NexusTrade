@@ -184,3 +184,40 @@ async def test_meta_summary_graceful_degradation_on_helper_failure():
         assert data["total_value"] == pytest.approx(1004465.03, abs=0.01)
         assert data["realized_pnl"] is None
         assert data["next_rebalance_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_meta_status_returns_200_with_real_doc():
+    """Verify GET /api/meta/status returns 200 and portfolio details with live Mongo doc."""
+    from main import app
+
+    meta_coll = _mock_coll(find_one_result=REAL_META_DOC)
+    with patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/meta/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "portfolio" in data
+        assert data["portfolio"]["total_value"] == pytest.approx(1004465.03, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_meta_status_graceful_degradation_on_db_disconnect():
+    """Verify GET /api/meta/status returns 200 and graceful status if DB is disconnected, never 500."""
+    from main import app
+
+    with patch("routers.meta.get_meta_portfolio_collection", return_value=None), \
+         patch("routers.meta._ensure_db", new_callable=AsyncMock, return_value=None):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/meta/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("portfolio") is None
+        assert data.get("recent_trades") == []
+        assert data.get("equity") == []
+
+

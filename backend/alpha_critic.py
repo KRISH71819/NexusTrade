@@ -76,47 +76,48 @@ def _parse_critique(raw: str) -> dict:
 
 def check_structural_rejections(expr: str) -> dict | None:
     """
-    Pre-sandbox structural rejections (Section 4 A & B) — fires BEFORE LLM or sandbox:
-    1. Multi-conjunction: 3+ AND-conjoined threshold conditions -> REJECT ('selectivity risk')
-    2. Fast-cross: lookback < 60 days in entry / fast oscillator -> REJECT ('structural turnover too high')
+    Pre-sandbox structural rejections — fires BEFORE LLM or sandbox:
+    1. Multi-conjunction: 3+ binary threshold conditions (e.g. cond1 < x and cond2 < y and cond3 > z)
+       -> REJECT ('selectivity risk: 3+ conjunctions never fire').
+       Relaxed: counts only binary threshold comparisons (>, <, >=, <=), NOT centered multiplicative factors.
+    2. Fast-cross: lookback < 60 days in entry / fast oscillator -> REJECT ('structural turnover too high').
+    3. Degenerate non-negative check: expression is product/sum of non-negative ops (rank, 1-rank, abs, std-ratios)
+       with NO centering (-0.5) and NO threshold (>x) -> REVISE ('no cross-sectional selection').
     """
     if not expr or not isinstance(expr, str):
         return None
 
     import ast
 
-    # ── A. Multi-conjunction detector (3+ AND-conjoined conditions) ──────────
+    tree = None
     try:
         tree = ast.parse(expr, mode="eval")
+    except Exception:
+        pass
 
-        def count_and_nodes(node):
-            if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
-                return sum(count_and_nodes(v) for v in node.values)
-            elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.And)):
-                return count_and_nodes(node.left) + count_and_nodes(node.right)
-            return 1
-
-        if count_and_nodes(tree.body) >= 3:
+    # ── A. Multi-conjunction detector: count only binary threshold conditions (3+) ──
+    if tree is not None:
+        compare_nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)]
+        if len(compare_nodes) >= 3:
             return {
                 "verdict": "REJECT",
                 "reasons": ["selectivity risk: 3+ conjunctions never fire"],
                 "fatal_flaw": "selectivity risk: 3+ conjunctions never fire",
             }
-    except Exception:
-        pass
-
-    and_tokens = re.split(r'\s+and\s+|\s*&\s*', expr, flags=re.IGNORECASE)
-    if len(and_tokens) >= 3:
-        return {
-            "verdict": "REJECT",
-            "reasons": ["selectivity risk: 3+ conjunctions never fire"],
-            "fatal_flaw": "selectivity risk: 3+ conjunctions never fire",
-        }
+    else:
+        # Fallback if AST parse fails: look for 3+ comparison operators conjoined by and/&
+        and_tokens = re.split(r'\s+and\s+|\s*&\s*', expr, flags=re.IGNORECASE)
+        comparison_tokens = [t for t in and_tokens if re.search(r'[><=!]=?', t)]
+        if len(comparison_tokens) >= 3:
+            return {
+                "verdict": "REJECT",
+                "reasons": ["selectivity risk: 3+ conjunctions never fire"],
+                "fatal_flaw": "selectivity risk: 3+ conjunctions never fire",
+            }
 
     # ── B. Fast-cross detector (lookback < 60 days / fast oscillator) ─────────
     fast_funcs = {"macd", "macd_hist", "macd_cross"}
-    try:
-        tree = ast.parse(expr, mode="eval")
+    if tree is not None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 func_name = ""
@@ -141,8 +142,6 @@ def check_structural_rejections(expr: str) -> dict | None:
                                 "reasons": ["structural turnover too high — fast oscillator"],
                                 "fatal_flaw": "structural turnover too high — fast oscillator",
                             }
-    except Exception:
-        pass
 
     if re.search(r'\b(macd|macd_hist|macd_cross)\b', expr, flags=re.IGNORECASE):
         return {
@@ -162,6 +161,26 @@ def check_structural_rejections(expr: str) -> dict | None:
                 "verdict": "REJECT",
                 "reasons": ["structural turnover too high — fast oscillator"],
                 "fatal_flaw": "structural turnover too high — fast oscillator",
+            }
+
+    # ── C. Degenerate non-negative check (Patch v3) ───────────────────────────
+    # Expression is product/sum of non-negative ops (rank, 1-rank, abs, std-ratios)
+    # with NO centering (-0.5) and NO threshold (>x) => REVISE "no cross-sectional selection".
+    has_threshold = False
+    if tree is not None:
+        has_threshold = any(isinstance(n, ast.Compare) for n in ast.walk(tree))
+    else:
+        has_threshold = bool(re.search(r'[><=!]=?', expr))
+
+    if not has_threshold:
+        expr_lower = expr.lower()
+        contains_nonneg_ops = bool(re.search(r'\b(rank|abs|std|volume_ratio)\b', expr_lower))
+        has_centering = bool(re.search(r'-\s*(?:0\.5|0\.50|1\.0|1\b)', expr))
+        if contains_nonneg_ops and not has_centering:
+            return {
+                "verdict": "REVISE",
+                "reasons": ["no cross-sectional selection: expression is product/sum of non-negative ops without centering (-0.5) or threshold (>x)"],
+                "fatal_flaw": "no cross-sectional selection",
             }
 
     return None

@@ -133,8 +133,12 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float) -> dict | 
         name = cand.get("name", name)
         hypothesis = cand.get("hypothesis", hypothesis)
 
+    portfolio_rule = cand.get("portfolio_rule", getattr(settings, "alpha_default_portfolio_rule", "top_n"))
     daily_net, info = backtest_signal(
         panel, cand["expression"],
+        portfolio_rule=portfolio_rule,
+        top_n=settings.meta_top_n,
+        rebalance_days=settings.meta_rebalance_days,
         cadence_days=int(cand.get("cadence_days", settings.alpha_default_cadence)),
         min_hold_days=int(cand.get("min_hold_days", settings.alpha_default_min_hold)),
     )
@@ -150,11 +154,17 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float) -> dict | 
         }
     metrics = compute_metrics(daily_net)
     metrics["ann_turnover"] = info.get("ann_turnover", 0.0)
+    metrics["avg_names_held"] = info.get("avg_names_held", 0.0)
+    metrics["exposure_mean"] = info.get("exposure_mean", 0.0)
+    metrics["benchmark_clone"] = info.get("benchmark_clone", False)
     folds = walk_forward_sharpes(daily_net)
     gates = apply_gates(metrics, folds, bench_max_dd_pct=bench_dd)
+    if metrics["benchmark_clone"]:
+        gates["all"] = False
 
     print(f"  tickers   : {info['tickers_used']} | days: {info['days']} | "
-          f"exposure: {info['exposure_pct']}%")
+          f"exposure: {info['exposure_pct']}% | avg_names: {metrics['avg_names_held']} | "
+          f"clone: {metrics['benchmark_clone']}")
     if metrics.get("status") == "insufficient_data":
         print(f"  NOT ENOUGH DATA ({metrics.get('days')} days)")
         return {

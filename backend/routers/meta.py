@@ -9,26 +9,82 @@ from database import (
 )
 from meta_portfolio import rebalance_meta_portfolio
 
+import logging
+_logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/meta", tags=["Meta Research"])
 
 SYSTEM_B_BADGE = ("SYSTEM B — VALIDATED CONFIG: trend_200 rank | top-25 | "
                   "60d rebalance | trend overlay | vol target 15%")
 
 
+async def _ensure_db():
+    """Ensure MongoDB connection is active, auto-connecting if needed."""
+    from database import get_db, connect_db
+    try:
+        return get_db()
+    except Exception:
+        try:
+            return await connect_db()
+        except Exception as e:
+            _logger.warning(f"Database auto-connect failed: {e}")
+            return None
+
+
+async def _get_meta_portfolio_doc() -> dict | None:
+    """Fetch the meta portfolio doc with auto-connect and fallback query."""
+    await _ensure_db()
+    try:
+        coll = get_meta_portfolio_collection()
+        if coll is None:
+            return None
+        doc = await coll.find_one({"_id": "meta"}, {"_id": 0})
+        if not doc:
+            doc = await coll.find_one({}, {"_id": 0})
+        return doc
+    except Exception as e:
+        _logger.warning(f"Failed to fetch meta portfolio doc: {e}", exc_info=True)
+        return None
+
+
 @router.get("/status")
 async def meta_status():
-    doc = await get_meta_portfolio_collection().find_one({"_id": "meta"}, {"_id": 0})
-    trades = await get_meta_trades_collection().find(
-        {}, {"_id": 0}).sort("timestamp", -1).limit(15).to_list(length=15)
-    equity = await get_meta_equity_collection().find(
-        {}, {"_id": 0}).sort("timestamp", -1).limit(30).to_list(length=30)
-    return {"portfolio": doc, "recent_trades": trades, "equity": list(reversed(equity))}
+    doc = await _get_meta_portfolio_doc()
+
+    trades = []
+    try:
+        await _ensure_db()
+        coll = get_meta_trades_collection()
+        if coll is not None:
+            trades = await coll.find(
+                {}, {"_id": 0}).sort("timestamp", -1).limit(15).to_list(length=15)
+    except Exception as e:
+        _logger.warning(f"Failed to fetch meta trades in meta_status: {e}")
+
+    equity = []
+    try:
+        await _ensure_db()
+        coll = get_meta_equity_collection()
+        if coll is not None:
+            equity = await coll.find(
+                {}, {"_id": 0}).sort("timestamp", -1).limit(30).to_list(length=30)
+    except Exception as e:
+        _logger.warning(f"Failed to fetch meta equity in meta_status: {e}")
+
+    return {"portfolio": doc, "recent_trades": trades, "equity": list(reversed(equity)) if equity else []}
 
 
 @router.get("/equity")
 async def meta_equity():
-    docs = await get_meta_equity_collection().find(
-        {}, {"_id": 0}).sort("timestamp", 1).to_list(length=500)
+    docs = []
+    try:
+        await _ensure_db()
+        coll = get_meta_equity_collection()
+        if coll is not None:
+            docs = await coll.find(
+                {}, {"_id": 0}).sort("timestamp", 1).to_list(length=500)
+    except Exception as e:
+        _logger.warning(f"Failed to fetch equity docs in meta_equity: {e}")
     return {"equity": docs, "count": len(docs)}
 
 
@@ -211,11 +267,7 @@ async def meta_summary():
     from kill_switch import is_kill_switch_on
     from market_time import ist_today_str
 
-    try:
-        doc = await get_meta_portfolio_collection().find_one({"_id": "meta"}, {"_id": 0})
-    except Exception as e:
-        _log.warning(f"Failed to fetch meta portfolio doc: {e}", exc_info=True)
-        doc = None
+    doc = await _get_meta_portfolio_doc()
 
     if not doc:
         return {"status": "no_portfolio",

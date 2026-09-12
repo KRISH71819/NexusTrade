@@ -76,3 +76,61 @@ class TestEvaluator:
         d = pd.Series([0.0] * 60 + [0.10, -0.05, 0.0])
         m = compute_metrics(d)
         assert -5.1 <= m["max_dd_pct"] <= -4.9
+
+
+class TestPortfolioRules:
+    def test_top_n_mode_and_metrics(self):
+        from alpha_sandbox.sandbox import backtest_signal
+
+        dates = pd.date_range("2023-01-01", periods=150, freq="B")
+        panel = {}
+        for i in range(10):
+            prices = [100.0 + (i + 1) * 0.1 * step for step in range(150)]
+            panel[f"TICKER_{i}"] = pd.DataFrame({
+                "date": dates,
+                "open": prices,
+                "high": [p + 1 for p in prices],
+                "low": [p - 1 for p in prices],
+                "close": prices,
+                "volume": [1_000_000] * 150,
+            })
+
+        daily_net, info = backtest_signal(
+            panel,
+            "close / sma(close, 20) - 1",
+            portfolio_rule="top_n",
+            top_n=3,
+            rebalance_days=20,
+        )
+        assert "avg_names_held" in info
+        assert "exposure_mean" in info
+        assert "benchmark_clone" in info
+        assert info["portfolio_rule"] == "top_n"
+        assert info["avg_names_held"] <= 3.0
+        assert not info["benchmark_clone"]
+
+    def test_benchmark_clone_detection(self):
+        from alpha_sandbox.sandbox import backtest_signal
+
+        dates = pd.date_range("2023-01-01", periods=100, freq="B")
+        panel = {}
+        for i in range(5):
+            prices = [100.0 + step for step in range(100)]
+            panel[f"TICKER_{i}"] = pd.DataFrame({
+                "date": dates,
+                "open": prices,
+                "high": [p + 1 for p in prices],
+                "low": [p - 1 for p in prices],
+                "close": prices,
+                "volume": [1_000_000] * 100,
+            })
+
+        # When all signals > 0 in sign mode, holds all 5 tickers => avg_names_held = 5.0 > 0.9 * 5 => clone
+        daily_net, info = backtest_signal(
+            panel,
+            "close / sma(close, 20) - 1",
+            portfolio_rule="sign",
+        )
+        assert info["avg_names_held"] >= 4.5
+        assert info["benchmark_clone"] is True
+

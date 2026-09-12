@@ -180,6 +180,7 @@ class Settings(BaseSettings):
     alpha_target_annual_turnover: float = 12.0 # target annual turnover for generator (< 12x)
     alpha_min_signal_lookback: int = 60     # minimum lookback days for entry signal / oscillator
     alpha_max_conjunction_conditions: int = 3 # maximum AND-conjoined conditions before structural rejection
+    alpha_default_portfolio_rule: str = "top_n" # default sandbox portfolio construction mode ("top_n" or "sign")
 
     # ── Meta Research Portfolio — validated config (Phase 12) ─────────
     meta_portfolio_enabled: bool = True         # master switch (System B active)

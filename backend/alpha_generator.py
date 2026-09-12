@@ -89,15 +89,14 @@ BASE_RATES = """EMPIRICAL BASE RATES (clean 2010+ window, equal-weight large-cap
 - To pass you need SELECTIVITY (long 20-70% of days) and/or much smaller drawdown.
 - Use ONE trend anchor + ONE selective entry condition. Holds of weeks, not days.
 
-SCORE SEMANTICS (v2): the expression value is used two ways:
- - timing mode: score > 0 => long that ticker;
- - ranking mode: the HIGHEST scores are bought (top-N cross-sectionally,
-   rebalanced monthly). This is the primary mode.
-Design scores where HIGHER = stronger expected return over the next 1-4 weeks.
-EMPIRICAL LAW (measured on this universe, costs 0.544%/side):
- - slow scores (sma/ema 20-120, 60d momentum) survive costs;
- - daily-flip conditions die in costs;
- - buy&hold = Sharpe 1.06; any active rule must earn its costs."""
+PORTFOLIO & SCORE SEMANTICS:
+- rank() returns 0..1 cross-sectionally across the entire universe.
+- top_n mode longs the top-25 by your score (rebalance 60d, 200d trend overlay, 15% vol target).
+- Write scores where HIGHER = BETTER (higher score = stronger expected forward performance).
+- NEVER rely on sign of a non-negative product (e.g. rank(...) * rank(...) is always >= 0 for all stocks, collapsing into an unselective benchmark clone).
+- When using multiple factors, either center them (e.g. (rank(...) - 0.5)), use price trend anchors (close / sma(close, 200) - 1.0), or use explicit thresholds (rank(...) > 0.70).
+- EMPIRICAL LAW: slow scores (sma/ema 60-200, 60-120d momentum) survive costs; fast daily flips die in costs."""
+
 
 
 def _get_best_near_miss_line(memory: list) -> str:

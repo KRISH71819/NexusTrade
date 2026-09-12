@@ -78,64 +78,192 @@ def backtest_signal(
     embargo: int | None = None,
     cadence_days: int | None = None,
     min_hold_days: int | None = None,
+    portfolio_rule: str | None = None,
+    top_n: int | None = None,
+    rebalance_days: int | None = None,
+    use_trend_overlay: bool = True,
+    trend_window: int = 200,
+    use_vol_target: bool = True,
+    target_ann_vol: float = 0.15,
 ):
     """
-    Long-only directional backtest of one DSL alpha.
-    Returns (daily_net_returns, info). Daily returns are equal-weighted over
-    tickers holding a position that day (deployed capital), net of costs.
+    Backtest of one DSL alpha.
+    Modes:
+      - mode='top_n' (default for candidates): long equal-weight top-N by score (N=25),
+        rebalance 60d, with 200d market trend overlay + 15% vol targeting (identical
+        to live System B meta portfolio).
+      - mode='sign': long all stocks where score > 0 (kept for centered expressions
+        and buy&hold benchmark 'close / close').
+    Returns (daily_net_returns, info).
     """
     embargo = settings.alpha_embargo_days if embargo is None else embargo
     cadence_days = settings.alpha_default_cadence if cadence_days is None else cadence_days
     min_hold_days = settings.alpha_default_min_hold if min_hold_days is None else min_hold_days
     rate = one_side_cost_rate()
 
-    ret_frames, pos_frames, turn_frames = {}, {}, {}
+    # Determine mode: default candidates to top_n; 'close / close' benchmark defaults to sign
+    rule = portfolio_rule or getattr(settings, "alpha_default_portfolio_rule", "top_n")
+    if expression.strip() == "close / close":
+        rule = "sign"
+
+    if rule == "sign":
+        ret_frames, pos_frames, turn_frames = {}, {}, {}
+        clipped_outliers = 0
+        for ticker, raw in panel.items():
+            try:
+                df = raw.set_index("date").sort_index()
+                signal = evaluate_expression(expression, df)
+            except Exception as e:
+                logger.warning(f"{ticker}: expression failed: {e}")
+                continue
+            close = df["close"].astype(float)
+            ret = close.pct_change()
+            clipped_outliers += int(((ret > MAX_DAILY_MOVE) | (ret < -MAX_DAILY_MOVE)).sum())
+            ret = ret.clip(-MAX_DAILY_MOVE, MAX_DAILY_MOVE)
+            pos = (signal.fillna(0.0) > 0).astype(float).shift(embargo).fillna(0.0)
+            pos = _apply_position_rules(pos, cadence_days, min_hold_days)
+            ret_frames[ticker] = ret
+            pos_frames[ticker] = pos
+            turn_frames[ticker] = pos.diff().abs().fillna(pos.abs())
+
+        if not ret_frames:
+            return pd.Series(dtype=float), {"tickers_used": 0}
+
+        ret_df = pd.DataFrame(ret_frames).fillna(0.0)
+        pos_df = pd.DataFrame(pos_frames).fillna(0.0)
+        turn_df = pd.DataFrame(turn_frames).fillna(0.0)
+
+        active = pos_df.sum(axis=1)
+        gross = (ret_df * pos_df).sum(axis=1)
+        turn = turn_df.sum(axis=1)
+
+        mask = active > 0
+        daily_gross = pd.Series(0.0, index=ret_df.index)
+        daily_turn = pd.Series(0.0, index=ret_df.index)
+        daily_gross[mask] = gross[mask] / active[mask]
+        daily_turn[mask] = turn[mask] / active[mask]
+        daily_net = (daily_gross - daily_turn * rate).fillna(0.0)
+
+        universe_size = len(ret_frames)
+        avg_names_held = round(float(active[mask].mean()) if mask.any() else 0.0, 2)
+        exposure_mean = round(float(mask.mean()), 4)
+        benchmark_clone = bool(avg_names_held > 0.9 * universe_size)
+
+        info = {
+            "tickers_used": universe_size,
+            "days": int(len(daily_net)),
+            "exposure_pct": round(float(mask.mean()) * 100, 1),
+            "exposure_mean": exposure_mean,
+            "avg_names_held": avg_names_held,
+            "benchmark_clone": benchmark_clone,
+            "one_side_cost_rate": round(rate, 5),
+            "clipped_outlier_days": clipped_outliers,
+            "ann_turnover": round(float(daily_turn.sum() / (len(daily_net) / 252)), 1),
+            "cadence_days": cadence_days,
+            "min_hold_days": min_hold_days,
+            "portfolio_rule": "sign",
+        }
+        return daily_net, info
+
+    # ── mode="top_n" (identical construction to incumbent live meta book) ─────
+    top_n_val = top_n if top_n is not None else settings.meta_top_n
+    rb_days = rebalance_days if rebalance_days is not None else settings.meta_rebalance_days
+
+    signal_frames, close_frames = {}, {}
     clipped_outliers = 0
     for ticker, raw in panel.items():
         try:
-            # ONE shared date index for signal, positions and returns
             df = raw.set_index("date").sort_index()
             signal = evaluate_expression(expression, df)
+            close = df["close"].astype(float)
+            signal_frames[ticker] = signal
+            close_frames[ticker] = close
         except Exception as e:
-            logger.warning(f"{ticker}: expression failed: {e}")
+            logger.warning(f"{ticker}: top_n eval failed: {e}")
             continue
-        close = df["close"].astype(float)
-        ret = close.pct_change()
-        clipped_outliers += int(((ret > MAX_DAILY_MOVE) | (ret < -MAX_DAILY_MOVE)).sum())
-        ret = ret.clip(-MAX_DAILY_MOVE, MAX_DAILY_MOVE)
-        pos = (signal.fillna(0.0) > 0).astype(float).shift(embargo).fillna(0.0)
-        pos = _apply_position_rules(pos, cadence_days, min_hold_days)
-        ret_frames[ticker] = ret
-        pos_frames[ticker] = pos
-        turn_frames[ticker] = pos.diff().abs().fillna(pos.abs())
 
-    if not ret_frames:
+    if not close_frames:
         return pd.Series(dtype=float), {"tickers_used": 0}
 
-    ret_df = pd.DataFrame(ret_frames).fillna(0.0)   # aligned on dates
-    pos_df = pd.DataFrame(pos_frames).fillna(0.0)   # aligned on dates
-    turn_df = pd.DataFrame(turn_frames).fillna(0.0)
+    close_df = pd.DataFrame(close_frames).sort_index()
+    signal_df = pd.DataFrame(signal_frames).reindex(close_df.index)
+    ret_df = close_df.pct_change()
+    clipped_outliers = int(((ret_df > MAX_DAILY_MOVE) | (ret_df < -MAX_DAILY_MOVE)).sum().sum())
+    ret_df = ret_df.clip(-MAX_DAILY_MOVE, MAX_DAILY_MOVE).fillna(0.0)
+    n = len(close_df)
+    universe_size = close_df.shape[1]
 
-    active = pos_df.sum(axis=1)
-    gross = (ret_df * pos_df).sum(axis=1)
-    turn = turn_df.sum(axis=1)
+    # 1. Market composite index (equal-weighted normalized price)
+    norm = close_df.div(close_df.iloc[0])
+    composite = norm.mean(axis=1, skipna=True)
 
-    mask = active > 0
-    daily_gross = pd.Series(0.0, index=ret_df.index)
-    daily_turn = pd.Series(0.0, index=ret_df.index)
-    daily_gross[mask] = gross[mask] / active[mask]
-    daily_turn[mask] = turn[mask] / active[mask]
-    daily_net = (daily_gross - daily_turn * rate).fillna(0.0)
+    # 2. Trend overlay (200d SMA on composite)
+    if use_trend_overlay:
+        sma = composite.rolling(trend_window, min_periods=min(60, n)).mean()
+        trend_on = (composite > sma).fillna(False)
+    else:
+        trend_on = pd.Series(True, index=close_df.index)
+
+    # 3. Vol targeting (120d lookback realized vol, target=15%)
+    if use_vol_target:
+        daily_comp_ret = composite.pct_change()
+        rv = daily_comp_ret.rolling(120, min_periods=min(60, n)).std(ddof=1) * np.sqrt(252)
+        vs = (target_ann_vol / rv).clip(settings.meta_vol_floor, settings.meta_vol_cap).fillna(1.0)
+    else:
+        vs = pd.Series(1.0, index=close_df.index)
+
+    exposure_series = trend_on.astype(float) * vs
+
+    # 4. Top-N portfolio weights with 60d rebalance cadence
+    weight_df = pd.DataFrame(0.0, index=close_df.index, columns=close_df.columns)
+    warmup = min(60, max(0, n - 1))
+    rb = list(range(warmup + embargo, n - embargo, rb_days))
+    if not rb and n > embargo + 1:
+        rb = [embargo + 1]
+
+    base_weights = pd.DataFrame(0.0, index=close_df.index, columns=close_df.columns)
+    for k, i in enumerate(rb):
+        scores = signal_df.iloc[i].dropna()
+        w = pd.Series(0.0, index=close_df.columns)
+        if len(scores):
+            picks = scores.sort_values(ascending=False).head(top_n_val).index
+            w[picks] = 1.0 / len(picks)
+        next_i = rb[k + 1] if k + 1 < len(rb) else n
+        a = i + embargo + 1
+        b = min(next_i + embargo + 1, n)
+        if a >= n:
+            break
+        base_weights.iloc[a:b] = w.values
+
+    # Scale base weights by the daily exposure series
+    weight_df = base_weights.mul(exposure_series.reindex(base_weights.index).fillna(0.0), axis=0)
+
+    # 5. Turnover and net returns
+    turn = weight_df.diff().abs().sum(axis=1)
+    turn.iloc[0] = weight_df.abs().sum(axis=1).iloc[0]
+    cost = (turn * rate).fillna(0.0)
+    daily_gross = (weight_df * ret_df).sum(axis=1)
+    daily_net = (daily_gross - cost).fillna(0.0)
+
+    names_held_daily = (weight_df.abs() > 1e-6).sum(axis=1)
+    active_days_mask = names_held_daily > 0
+    avg_names_held = round(float(names_held_daily[active_days_mask].mean()) if active_days_mask.any() else 0.0, 2)
+    exposure_mean = round(float(weight_df.sum(axis=1).mean()), 4)
+    benchmark_clone = bool(avg_names_held > 0.9 * universe_size)
 
     info = {
-        "tickers_used": len(ret_frames),
-        "days": int(len(daily_net)),
-        "exposure_pct": round(float(mask.mean()) * 100, 1),
+        "tickers_used": universe_size,
+        "days": n,
+        "exposure_pct": round(float(active_days_mask.mean()) * 100, 1),
+        "exposure_mean": exposure_mean,
+        "avg_names_held": avg_names_held,
+        "benchmark_clone": benchmark_clone,
+        "ann_turnover": round(float(turn.sum() / (n / 252)), 1) if n > 0 else 0.0,
+        "top_n": top_n_val,
+        "rebalance_days": rb_days,
         "one_side_cost_rate": round(rate, 5),
         "clipped_outlier_days": clipped_outliers,
-        "ann_turnover": round(float(daily_turn.sum() / (len(daily_net) / 252)), 1),
-        "cadence_days": cadence_days,
-        "min_hold_days": min_hold_days,
+        "portfolio_rule": "top_n",
     }
     return daily_net, info
 

@@ -61,6 +61,25 @@ class TestStructuralRejections:
         """Valid slow signal with lookback >= 60 passes structural checks."""
         from alpha_critic import check_structural_rejections
 
-        expr = "rank(close / sma(close, 200) - 1, 200)"
+        expr = "rank(close / sma(close, 200) - 1, 200) - 0.5"
         res = check_structural_rejections(expr)
         assert res is None
+
+    def test_degenerate_non_negative_revises(self):
+        """Patch v3: product/sum of non-negative ops with no centering or threshold -> REVISE."""
+        from alpha_critic import check_structural_rejections
+
+        expr = "rank(close, 60) * rank(volume, 60)"
+        res = check_structural_rejections(expr)
+        assert res is not None
+        assert res["verdict"] == "REVISE"
+        assert "no cross-sectional selection" in res["fatal_flaw"]
+
+    def test_centered_multiplication_passes_structural_checks(self):
+        """Patch v3: centered multiplicative factors are NOT rejected by conjunction kill."""
+        from alpha_critic import check_structural_rejections
+
+        expr = "(close / sma(close, 200) - 1.0) * (rank(delta(close, 60), 60) - 0.5)"
+        res = check_structural_rejections(expr)
+        assert res is None
+
