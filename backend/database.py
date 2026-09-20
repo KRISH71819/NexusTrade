@@ -23,7 +23,11 @@ _db = None
 
 
 async def connect_db():
-    """Initialize the async MongoDB client and return the database."""
+    """Initialize the async MongoDB client and return the database.
+    
+    Globals _client and _db are only set if the connection ping succeeds,
+    preventing dead handles from persisting on failed connections.
+    """
     global _client, _db
     client_options = {
         "serverSelectionTimeoutMS": 10000,
@@ -33,13 +37,15 @@ async def connect_db():
     if certifi is not None:
         client_options["tlsCAFile"] = certifi.where()
 
-    _client = AsyncMongoClient(settings.mongodb_uri, **client_options)
-    _db = _client[settings.mongodb_db_name]
+    client = AsyncMongoClient(settings.mongodb_uri, **client_options)
+    db = client[settings.mongodb_db_name]
 
     # Verify connection with a ping
     try:
-        await _db.command("ping")
+        await db.command("ping")
         logger.info(f"Connected to MongoDB: {settings.mongodb_db_name}")
+        _client = client
+        _db = db
 
         # Create indexes
         await _ensure_indexes()
@@ -47,21 +53,58 @@ async def connect_db():
         # Seed portfolio if it doesn't exist
         await _seed_portfolio()
 
+        return _db
     except Exception as e:
         logger.warning(
             f"MongoDB not available ({e}). "
             f"Server will start but DB operations will fail until MongoDB is running."
         )
-
-    return _db
+        try:
+            await client.close()
+        except Exception:
+            pass
+        _client = None
+        _db = None
+        return None
 
 
 async def close_db():
-    """Gracefully close the MongoDB connection."""
-    global _client
+    """Gracefully close the MongoDB connection and clear globals."""
+    global _client, _db
     if _client:
-        await _client.close()
-        logger.info("MongoDB connection closed.")
+        try:
+            await _client.close()
+        except Exception:
+            pass
+        _client = None
+    _db = None
+    logger.info("MongoDB connection closed.")
+
+
+async def ensure_connected() -> bool:
+    """Ensure database connection is alive by pinging.
+    
+    If ping fails or _db is None, closes and recreates client (connect_db())
+    and pings once more. Returns True on success, False on failure.
+    """
+    global _client, _db
+    if _db is not None:
+        try:
+            await _db.command("ping")
+            return True
+        except Exception as e:
+            logger.warning(f"MongoDB ping failed on existing handle: {e}")
+
+    # Recreate client on failure or if not connected
+    await close_db()
+    new_db = await connect_db()
+    if new_db is not None:
+        try:
+            await new_db.command("ping")
+            return True
+        except Exception as e:
+            logger.warning(f"MongoDB ping failed on recreated handle: {e}")
+    return False
 
 
 def get_db():

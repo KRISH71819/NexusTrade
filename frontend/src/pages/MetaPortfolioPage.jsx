@@ -144,7 +144,8 @@ export default function MetaPortfolioPage() {
     );
   }
 
-  const noBook = summary?.status === "no_portfolio";
+  const isDbError = summary?.status === "db_error" || summary?.db_online === false;
+  const noBook = (summary?.status === "no_portfolio" || (!summary?.total_value && !isDbError)) && summary?.db_online !== false;
   const holdings = statusDoc?.portfolio?.holdings || [];
   const trades = statusDoc?.recent_trades || [];
   const killOn = !!summary?.kill_switch_active;
@@ -210,7 +211,25 @@ export default function MetaPortfolioPage() {
         </div>
       )}
 
-      {noBook ? (
+      {isDbError ? (
+        <div
+          className="notice error"
+          style={{
+            marginBottom: "16px",
+            color: "#fca5a5",
+            background: "rgba(239, 68, 68, 0.12)",
+            border: "1px solid rgba(239, 68, 68, 0.4)",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+          }}
+        >
+          <ShieldAlert size={16} />
+          <span>
+            BACKEND DATABASE OFFLINE — meta book may exist but is unreachable. Check /api/health.
+          </span>
+        </div>
+      ) : noBook ? (
         <div className="notice" style={{ marginBottom: "16px" }}>
           <Activity size={16} />
           <span>

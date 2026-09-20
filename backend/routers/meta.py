@@ -20,58 +20,66 @@ SYSTEM_B_BADGE = ("SYSTEM B — VALIDATED CONFIG: trend_200 rank | top-25 | "
 
 async def _ensure_db():
     """Ensure MongoDB connection is active, auto-connecting if needed."""
-    from database import get_db, connect_db
+    from database import get_db, ensure_connected
     try:
-        return get_db()
-    except Exception:
-        try:
-            return await connect_db()
-        except Exception as e:
-            _logger.warning(f"Database auto-connect failed: {e}")
-            return None
+        if await ensure_connected():
+            return get_db()
+    except Exception as e:
+        _logger.warning(f"Database ensure_connected failed: {e}")
+    return None
 
 
-async def _get_meta_portfolio_doc() -> dict | None:
-    """Fetch the meta portfolio doc with auto-connect and fallback query."""
-    await _ensure_db()
+async def _get_meta_portfolio_doc() -> tuple[dict | None, bool]:
+    """Fetch the meta portfolio doc with auto-connect and fallback query.
+    
+    Returns (doc, is_db_error):
+      - (doc, False): DB healthy, document found
+      - (None, False): DB healthy, document does not exist in collection
+      - (None, True): DB error / unreachable
+    """
+    from database import ensure_connected
     try:
+        connected = await ensure_connected()
+        if not connected:
+            return None, True
         coll = get_meta_portfolio_collection()
         if coll is None:
-            return None
+            return None, True
         doc = await coll.find_one({"_id": "meta"}, {"_id": 0})
         if not doc:
             doc = await coll.find_one({}, {"_id": 0})
-        return doc
+        return doc, False
     except Exception as e:
         _logger.warning(f"Failed to fetch meta portfolio doc: {e}", exc_info=True)
-        return None
+        return None, True
 
 
 @router.get("/status")
 async def meta_status():
-    doc = await _get_meta_portfolio_doc()
+    doc, is_db_error = await _get_meta_portfolio_doc()
 
     trades = []
-    try:
-        await _ensure_db()
-        coll = get_meta_trades_collection()
-        if coll is not None:
-            trades = await coll.find(
-                {}, {"_id": 0}).sort("timestamp", -1).limit(15).to_list(length=15)
-    except Exception as e:
-        _logger.warning(f"Failed to fetch meta trades in meta_status: {e}")
+    if not is_db_error:
+        try:
+            coll = get_meta_trades_collection()
+            if coll is not None:
+                trades = await coll.find(
+                    {}, {"_id": 0}).sort("timestamp", -1).limit(15).to_list(length=15)
+        except Exception as e:
+            _logger.warning(f"Failed to fetch meta trades in meta_status: {e}")
 
     equity = []
-    try:
-        await _ensure_db()
-        coll = get_meta_equity_collection()
-        if coll is not None:
-            equity = await coll.find(
-                {}, {"_id": 0}).sort("timestamp", -1).limit(30).to_list(length=30)
-    except Exception as e:
-        _logger.warning(f"Failed to fetch meta equity in meta_status: {e}")
+    if not is_db_error:
+        try:
+            coll = get_meta_equity_collection()
+            if coll is not None:
+                equity = await coll.find(
+                    {}, {"_id": 0}).sort("timestamp", -1).limit(30).to_list(length=30)
+        except Exception as e:
+            _logger.warning(f"Failed to fetch meta equity in meta_status: {e}")
 
     return {"portfolio": doc, "recent_trades": trades, "equity": list(reversed(equity)) if equity else []}
+
 
 
 @router.get("/equity")
@@ -267,11 +275,29 @@ async def meta_summary():
     from kill_switch import is_kill_switch_on
     from market_time import ist_today_str
 
-    doc = await _get_meta_portfolio_doc()
+    kill_switch_on = False
+    try:
+        kill_switch_on = await is_kill_switch_on()
+    except Exception as e:
+        _log.warning(f"is_kill_switch_on check failed: {e}")
+
+    doc, is_db_error = await _get_meta_portfolio_doc()
+
+    if is_db_error:
+        return {
+            "status": "db_error",
+            "badge": SYSTEM_B_BADGE,
+            "db_online": False,
+            "kill_switch_active": bool(kill_switch_on),
+        }
 
     if not doc:
-        return {"status": "no_portfolio",
-                "badge": SYSTEM_B_BADGE}
+        return {
+            "status": "no_portfolio",
+            "badge": SYSTEM_B_BADGE,
+            "db_online": True,
+            "kill_switch_active": bool(kill_switch_on),
+        }
 
     total = float(doc.get("total_value", 0.0) or 0.0)
     initial = float(settings.meta_initial_capital or 0.0)
@@ -322,15 +348,10 @@ async def meta_summary():
         _log.warning(f"next_rebalance_info failed: {e}", exc_info=True)
         rebalance = {"next_rebalance_date": None, "days_until_rebalance": None}
 
-    kill_switch_on = False
-    try:
-        kill_switch_on = await is_kill_switch_on()
-    except Exception as e:
-        _log.warning(f"is_kill_switch_on check failed: {e}")
-
     return {
         "status": "ok",
         "badge": SYSTEM_B_BADGE,
+        "db_online": True,
         "total_value": round(total, 2),
         "initial_capital": initial,
         "since_inception_pct": round(total / initial - 1.0, 6) if initial > 0 else 0.0,

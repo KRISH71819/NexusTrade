@@ -7,6 +7,7 @@ export default function Topbar({ title, subtitle }) {
   const { status, isBusy, runAnalysis, refreshMarket, loadDashboard, selectedTicker } = useApp();
   const [tradingMode, setTradingMode] = useState(null);
   const [killActive, setKillActive] = useState(false);
+  const [dbOffline, setDbOffline] = useState(false);
 
   useEffect(() => {
     const fetchMode = async () => {
@@ -16,7 +17,9 @@ export default function Topbar({ title, subtitle }) {
           api.getKillSwitch().catch(() => null),
         ]);
         setTradingMode(mode?.mode || "paper");
-        setKillActive(ks?.enabled || false);
+        const hasDbError = !!(ks?.error || ks?.db_error);
+        setDbOffline(hasDbError);
+        setKillActive(!hasDbError && !!ks?.enabled);
       } catch {
         // Ignore
       }
@@ -38,11 +41,22 @@ export default function Topbar({ title, subtitle }) {
               {isLive ? <><Zap size={11} style={{ marginRight: 2 }} /> Live</> : "Paper"}
             </span>
           )}
-          {killActive && (
+          {dbOffline ? (
+            <span
+              className="kill-switch-indicator"
+              style={{
+                background: "rgba(239, 68, 68, 0.15)",
+                borderColor: "rgba(239, 68, 68, 0.5)",
+                color: "#fca5a5",
+              }}
+            >
+              <ShieldAlert size={10} style={{ marginRight: 2 }} /> DB OFFLINE
+            </span>
+          ) : killActive ? (
             <span className="kill-switch-indicator">
               <ShieldAlert size={10} style={{ marginRight: 2 }} /> Halted
             </span>
-          )}
+          ) : null}
         </div>
         {subtitle && <p>{subtitle}</p>}
       </div>

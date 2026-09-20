@@ -24,12 +24,42 @@ logger = logging.getLogger(__name__)
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
 
+async def _mongo_reconnect_worker():
+    """Background task retrying ensure_connected() every 30s until success."""
+    from database import ensure_connected, _ensure_indexes, _seed_portfolio
+    from kill_switch import initialize_kill_switch
+    attempt = 1
+    while True:
+        await asyncio.sleep(30)
+        logger.info(f"[DB RETRY] Attempt {attempt}: checking MongoDB connection...")
+        try:
+            connected = await ensure_connected()
+            if connected:
+                logger.info(f"[DB RETRY] MongoDB connected successfully on attempt {attempt}.")
+                try:
+                    await _ensure_indexes()
+                    await _seed_portfolio()
+                    await initialize_kill_switch()
+                except Exception as e:
+                    logger.warning(f"[DB RETRY] Post-connect setup failed: {e}")
+                break
+            else:
+                logger.warning(f"[DB RETRY] Attempt {attempt} failed: database still unreachable.")
+        except Exception as e:
+            logger.warning(f"[DB RETRY] Attempt {attempt} exception: {e}")
+        attempt += 1
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: connect DB + seed portfolio + init Dhan + start scheduler.  Shutdown: close all."""
     logger.info("Starting NexusTrade Agent...")
-    await connect_db()
-    logger.info("Database connected and portfolio initialized.")
+    db = await connect_db()
+    if db is not None:
+        logger.info("Database connected and portfolio initialized.")
+    else:
+        logger.warning("MongoDB not available at startup. Spawning background retry task (every 30s).")
+        asyncio.create_task(_mongo_reconnect_worker())
 
     # Initialize kill switch
     from kill_switch import initialize_kill_switch

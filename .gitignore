@@ -46,3 +46,10 @@ frontend/.env.local
 
 # External AI Architecture Docs
 docs/ARCHITECTURE_BRIEF_FOR_EXTERNAL_AI.md
+
+# Exported Codebase Bundles for External AI
+BACKEND_CODEBASE.md
+BACKEND_CODEBASE.txt
+FULL_PROJECT_CODEBASE.md
+FULL_PROJECT_CODEBASE.txt
+

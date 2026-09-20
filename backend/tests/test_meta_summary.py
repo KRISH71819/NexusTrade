@@ -136,7 +136,8 @@ async def test_meta_summary_returns_200_with_real_doc():
     trades_coll = _mock_coll(find_result=REAL_TRADES)
     equity_coll = _mock_coll(find_result=REAL_EQUITY_DOCS)
 
-    with patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll), \
+    with patch("database.ensure_connected", new_callable=AsyncMock, return_value=True), \
+         patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll), \
          patch("routers.meta.get_meta_trades_collection", return_value=trades_coll), \
          patch("routers.meta.get_meta_equity_collection", return_value=equity_coll), \
          patch("kill_switch.is_kill_switch_on", new_callable=AsyncMock, return_value=False):
@@ -165,7 +166,8 @@ async def test_meta_summary_graceful_degradation_on_helper_failure():
     trades_coll = _mock_coll(find_result=REAL_TRADES)
     equity_coll = _mock_coll(find_result=REAL_EQUITY_DOCS)
 
-    with patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll), \
+    with patch("database.ensure_connected", new_callable=AsyncMock, return_value=True), \
+         patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll), \
          patch("routers.meta.get_meta_trades_collection", return_value=trades_coll), \
          patch("routers.meta.get_meta_equity_collection", return_value=equity_coll), \
          patch("routers.meta.pnl_vs_history", side_effect=ValueError("Simulated equity corruption")), \
@@ -192,7 +194,8 @@ async def test_meta_status_returns_200_with_real_doc():
     from main import app
 
     meta_coll = _mock_coll(find_one_result=REAL_META_DOC)
-    with patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll):
+    with patch("database.ensure_connected", new_callable=AsyncMock, return_value=True), \
+         patch("routers.meta.get_meta_portfolio_collection", return_value=meta_coll):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get("/api/meta/status")
@@ -201,6 +204,7 @@ async def test_meta_status_returns_200_with_real_doc():
         data = resp.json()
         assert "portfolio" in data
         assert data["portfolio"]["total_value"] == pytest.approx(1004465.03, abs=0.01)
+
 
 
 @pytest.mark.asyncio
@@ -219,5 +223,48 @@ async def test_meta_status_graceful_degradation_on_db_disconnect():
         assert data.get("portfolio") is None
         assert data.get("recent_trades") == []
         assert data.get("equity") == []
+
+
+@pytest.mark.asyncio
+async def test_meta_summary_db_error():
+    """(a) DB raises -> GET /api/meta/summary returns 200, status 'db_error', db_online false, kill_switch_active present."""
+    from main import app
+
+    with patch("routers.meta._get_meta_portfolio_doc", new_callable=AsyncMock) as mock_get_doc, \
+         patch("kill_switch.is_kill_switch_on", new_callable=AsyncMock, return_value=True):
+        mock_get_doc.return_value = (None, True)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/meta/summary")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "db_error"
+        assert data["db_online"] is False
+        assert "kill_switch_active" in data
+        assert data["kill_switch_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_meta_summary_db_healthy_doc_missing():
+    """(b) DB healthy + doc missing -> status 'no_portfolio', db_online true, kill_switch_active present."""
+    from main import app
+
+    with patch("routers.meta._get_meta_portfolio_doc", new_callable=AsyncMock) as mock_get_doc, \
+         patch("kill_switch.is_kill_switch_on", new_callable=AsyncMock, return_value=False):
+        mock_get_doc.return_value = (None, False)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/meta/summary")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "no_portfolio"
+        assert data["db_online"] is True
+        assert "kill_switch_active" in data
+        assert data["kill_switch_active"] is False
+
 
 

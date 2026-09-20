@@ -127,7 +127,7 @@ async def get_kill_switch_status() -> dict:
 
     except Exception as e:
         logger.error(f"Error getting kill switch status: {e}")
-        return {"enabled": True, "error": str(e)}  # Err on safe side
+        return {"enabled": True, "error": str(e), "db_error": True}  # Err on safe side
 
 
 async def initialize_kill_switch():
