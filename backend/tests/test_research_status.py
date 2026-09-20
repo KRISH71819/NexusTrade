@@ -5,7 +5,7 @@ Tests for:
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 from httpx import AsyncClient, ASGITransport
 
@@ -180,3 +180,33 @@ async def test_research_status_returns_candidates_array_with_required_fields():
     # Check backward compatibility
     assert "log_tail" in data
     assert len(data["log_tail"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_revalidate_endpoint_http():
+    """Verify POST /api/research/hof/revalidate route works via FastAPI app."""
+    from main import app
+
+    mock_hof_cursor = MagicMock()
+    mock_hof_cursor.to_list = AsyncMock(return_value=[])
+
+    mock_hof_coll = MagicMock()
+    mock_hof_coll.find.return_value = mock_hof_cursor
+
+    mock_db = {
+        "hall_of_fame": mock_hof_coll,
+        "alpha_registry": MagicMock(),
+    }
+
+    with patch("routers.research.get_db", return_value=mock_db):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/research/hof/revalidate")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["scanned"] == 0
+    assert data["demoted"] == 0
+    assert data["remaining_active"] == 0
+

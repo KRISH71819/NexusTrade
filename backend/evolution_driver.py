@@ -181,6 +181,7 @@ async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> di
         record["passed"] = int(passed)
 
         hof = await hall_of_fame.refresh_hall_of_fame()
+        # FIX: Use the delta ('promoted') instead of the cumulative total
         record["hof_promoted"] = int(hof.get("promoted", 0))
         record["hof_active"] = int(hof.get("active", 0))
         _log_line(record, f"hall_of_fame refresh: promoted={hof.get('promoted')} "

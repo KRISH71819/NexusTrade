@@ -16,65 +16,94 @@ logger = logging.getLogger(__name__)
 COLLECTION = "hall_of_fame"
 
 
-def is_promotable(doc: dict, dd_mode: str | None = None,
-                  dd_relative: float | None = None,
-                  abs_dd_pct: float | None = None) -> bool:
+def is_promotable(doc: dict, dd_mode: str = "relative",
+                  dd_relative: float = 0.75,
+                  abs_dd_pct: float = 25.0) -> bool:
     """Pure promotion predicate (unit-testable, no DB)."""
-    dd_mode = dd_mode or settings.alpha_gate_dd_mode
     gates = doc.get("gates") or {}
+    metrics = doc.get("metrics") or {}
+
+    # 1. HARD GATE: Must pass all composite gates (rejects benchmark clones)
+    if not gates.get("all", False):
+        return False
+
+    # 2. HARD GATE: Explicitly reject benchmark clones (belt-and-braces)
+    if metrics.get("benchmark_clone", False):
+        return False
+
+    # 3. Existing logic (Sharpe, Stability, Drawdown)
     if not gates.get("sharpe") or not gates.get("stability"):
         return False
-    metrics = doc.get("metrics") or {}
+
     alpha_dd = metrics.get("max_dd_pct")
     if alpha_dd is None:
         return False
-    if dd_mode == "absolute":
-        limit = (abs_dd_pct if abs_dd_pct is not None else settings.alpha_gate_max_dd * 100)
-        return alpha_dd >= -limit
-    rel = dd_relative if dd_relative is not None else settings.alpha_gate_dd_relative
-    bench_dd = (doc.get("info") or {}).get("bench_max_dd_pct")
-    if bench_dd is None or bench_dd >= 0:
-        return False
-    return alpha_dd >= rel * bench_dd
+
+    mode = dd_mode or getattr(settings, "alpha_gate_dd_mode", "relative")
+    if mode == "relative":
+        bench_dd = (doc.get("info") or {}).get("bench_max_dd_pct")
+        if bench_dd is None or bench_dd >= 0:
+            return False
+        rel = dd_relative if dd_relative is not None else getattr(settings, "alpha_gate_dd_relative", 0.75)
+        threshold = bench_dd * rel
+        return alpha_dd >= threshold  # e.g., -30 >= -40 * 0.75
+    else:
+        limit = (abs_dd_pct if abs_dd_pct is not None else getattr(settings, "alpha_gate_max_dd", 0.25) * 100)
+        return alpha_dd >= -abs(limit)
 
 
 async def refresh_hall_of_fame() -> dict:
     reg = get_db()["alpha_registry"]
     hof = get_db()[COLLECTION]
-    promoted = 0
+    newly_promoted_count = 0
     async for doc in reg.find({}):
         if not is_promotable(doc):
             continue
+        expr = doc.get("expression")
+        name = doc.get("name")
+        query = {"expression": expr} if expr else {"name": name}
+        already_active = await hof.find_one({
+            **query,
+            "$or": [{"active": True}, {"status": "active"}],
+        })
         await hof.update_one(
-            {"expression": doc.get("expression")},
+            query,
             {"$set": {
-                "name": doc.get("name"),
-                "expression": doc.get("expression"),
+                "name": name,
+                "expression": expr,
                 "source": doc.get("source"),
                 "metrics": doc.get("metrics"),
                 "fold_sharpes": doc.get("fold_sharpes"),
                 "promoted_at": datetime.now(timezone.utc),
                 "status": "active",
+                "active": True,
             }},
             upsert=True,
         )
-        promoted += 1
-    active = await hof.count_documents({"status": "active"})
-    logger.info(f"Hall of Fame refresh: promoted={promoted} active={active}")
-    return {"promoted": promoted, "active": active}
+        if not already_active:
+            newly_promoted_count += 1
+
+    active_count = await hof.count_documents({"$or": [{"active": True}, {"status": "active"}]})
+    logger.info(f"Hall of Fame refresh: newly_promoted={newly_promoted_count} active={active_count}")
+    return {
+        "active": active_count,
+        "promoted": newly_promoted_count,
+        "total_historical": active_count,
+    }
 
 
 async def list_hall_of_fame(limit: int = 50) -> list:
     cursor = (get_db()[COLLECTION]
-              .find({"status": "active"}, {"_id": 0})
+              .find({"$or": [{"active": True}, {"status": "active"}]}, {"_id": 0})
               .sort("promoted_at", -1).limit(limit))
     return await cursor.to_list(length=limit)
 
 
 async def demote(expression: str, reason: str) -> dict:
     res = await get_db()[COLLECTION].update_one(
-        {"expression": expression, "status": "active"},
+        {"expression": expression, "$or": [{"active": True}, {"status": "active"}]},
         {"$set": {"status": "demoted",
+                  "active": False,
                   "demoted_at": datetime.now(timezone.utc),
                   "demote_reason": reason}},
     )
