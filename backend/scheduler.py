@@ -1275,6 +1275,35 @@ def start_scheduler():
             max_instances=1,
         )
 
+    # ── V2 EOD Engine (Phase 4) ─────────────────────────────────────────
+    from core.planner import v2_daily_mtm_and_regime, v2_rebalance_planner
+
+    _scheduler.add_job(
+        v2_daily_mtm_and_regime,
+        CronTrigger(
+            hour=15,
+            minute=32,
+            day_of_week="mon-fri",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="v2_mtm_regime",
+        name="V2 EOD MTM & Regime Engine",
+        max_instances=1,
+    )
+
+    _scheduler.add_job(
+        v2_rebalance_planner,
+        CronTrigger(
+            hour=15,
+            minute=40,
+            day_of_week="mon-fri",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="v2_rebalance",
+        name="V2 EOD Rebalance Planner",
+        max_instances=1,
+    )
+
     # ── Saturday scoped evolution batch (Section 3) ───────────────────
     # Registered ONLY if the auto switch is on. The manual
     # POST /api/research/trigger endpoint works regardless of this flag.
@@ -1319,6 +1348,29 @@ def start_scheduler():
         ),
         id="sunday_weekly_summary",
         name="Weekly Telegram Summary (meta + legacy + research)",
+        max_instances=1,
+    )
+
+    # ── Weekly size guard job (Phase 2) ─────────────────────────────────
+    from size_guard import check_and_enforce_storage_budget
+
+    async def _weekly_size_guard_job():
+        try:
+            res = await check_and_enforce_storage_budget()
+            logger.info(f"WEEKLY SIZE GUARD: {res}")
+        except Exception as e:
+            logger.error(f"Size guard job failed: {e}", exc_info=True)
+
+    _scheduler.add_job(
+        _weekly_size_guard_job,
+        CronTrigger(
+            day_of_week="sun",
+            hour="2",
+            minute="0",
+            timezone=settings.scheduler_timezone,
+        ),
+        id="weekly_size_guard",
+        name="Weekly MongoDB Storage Budget Guard",
         max_instances=1,
     )
 

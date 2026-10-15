@@ -1,92 +1,41 @@
-import { useState, useEffect } from "react";
-import { NavLink, useLocation } from "react-router-dom";
-import {
-  CandlestickChart,
-  ClipboardList,
-  LayoutDashboard,
-  Newspaper,
-  SlidersHorizontal,
-  Briefcase,
-  X,
-  TrendingUp,
-} from "lucide-react";
-import { useApp } from "../context/AppContext";
-import { api } from "../api";
+import { NavLink } from "react-router-dom";
+import { TrendingUp, Cpu, SlidersHorizontal, BookOpen } from "lucide-react";
 
 const navItems = [
   { to: "/", icon: TrendingUp, label: "System B", end: true },
-  { to: "/analysis", icon: CandlestickChart, label: "Chart" },
-  { to: "/legacy", icon: LayoutDashboard, label: "Legacy (frozen)" },
-  { to: "/portfolio", icon: Briefcase, label: "Portfolio" },
-  { to: "/news", icon: Newspaper, label: "News" },
-  { to: "/trades", icon: ClipboardList, label: "History" },
-  { to: "/trading", icon: SlidersHorizontal, label: "Controls" },
+  { to: "/research", icon: Cpu, label: "Research" },
+  { to: "/controls", icon: SlidersHorizontal, label: "Controls" },
+  { to: "/docs", icon: BookOpen, label: "Documentation" },
 ];
 
-export default function Sidebar({ isOpen, onClose }) {
-  const { status, dashboard } = useApp();
-  const location = useLocation();
-  const [tradingMode, setTradingMode] = useState("paper");
-
-  useEffect(() => {
-    api.getTradingMode().then(m => setTradingMode(m?.mode || "paper")).catch(() => {});
-  }, [location]);
-
+export default function Sidebar() {
   return (
-    <>
-      <div className={`sidebar-overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
-      <aside className={`sidebar ${isOpen ? "open" : ""}`}>
-        {/* Brand */}
-        <div className="brand">
-          <div className="brand-mark">NT</div>
-          <div>
-            <strong>NexusTrade</strong>
-            <span>{tradingMode === "live" ? "Live Mode" : "Paper Mode"}</span>
-          </div>
-          <button
-            className="btn-icon"
-            onClick={onClose}
-            style={{ display: isOpen ? "flex" : "none", marginLeft: "auto", background: "transparent", color: "var(--text-secondary)", cursor: "pointer", border: "none" }}
+    <aside className="v2-sidebar">
+      <div className="v2-sidebar-brand">
+        <span className="v2-brand-badge">NT</span>
+        <div>
+          <h1>NexusTrade</h1>
+        </div>
+      </div>
+
+      <nav className="v2-sidebar-nav">
+        {navItems.map(({ to, icon: Icon, label, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className={({ isActive }) => `v2-nav-item ${isActive ? "active" : ""}`}
+            title={label}
           >
-            <X size={18} />
-          </button>
-        </div>
+            <Icon size={18} />
+            <span>{label}</span>
+          </NavLink>
+        ))}
+      </nav>
 
-        {/* Navigation */}
-        <nav className="sidebar-nav">
-          {navItems.map(({ to, icon: Icon, label, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
-              onClick={onClose}
-              title={label}
-            >
-              <Icon />
-              <span>{label}</span>
-            </NavLink>
-          ))}
-        </nav>
-
-        {/* Connection Status / Market State */}
-        <div className="market-state">
-          <span className={`status-dot ${status.online ? "online" : ""}`} />
-          <div>
-            <strong>{status.online ? "Connected" : "Offline"}</strong>
-            <small>
-              {dashboard.watchlistInfo
-                ? `${dashboard.watchlistInfo.market}`
-                : "Market feed"}
-            </small>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="sidebar-footer">
-          v2.0
-        </div>
-      </aside>
-    </>
+      <div className="v2-sidebar-footer">
+        NexusTrade v2.0 • EOD Portfolio Engine
+      </div>
+    </aside>
   );
 }

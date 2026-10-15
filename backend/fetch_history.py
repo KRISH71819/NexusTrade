@@ -50,6 +50,8 @@ def _fetch_daily(ticker: str, period: str, start: str | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+    from data_sanitizer import clean_daily_bars
+    df = clean_daily_bars(df, ticker)
     return df.reset_index()
 
 

@@ -133,3 +133,23 @@ async def ensure_history_indexes() -> None:
     coll = get_ohlcv_history_collection()
     await coll.create_index([("ticker", 1), ("date", 1)], unique=True)
     logger.info("ohlcv_history indexes ensured.")
+
+
+async def get_qualified_universe(min_bars: int = 500) -> list[str]:
+    """
+    Returns a sorted list of tickers that have at least `min_bars` daily bars 
+    stored in the ohlcv_history collection.
+    """
+    coll = get_ohlcv_history_collection()
+    pipeline = [
+        {"$group": {"_id": "$ticker", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gte": min_bars}}},
+        {"$project": {"_id": 0, "ticker": "$_id"}}
+    ]
+    try:
+        docs = await coll.aggregate(pipeline).to_list(length=2000)
+        return sorted([d["ticker"] for d in docs])
+    except Exception as e:
+        logger.warning(f"Failed to fetch qualified universe: {e}")
+        return []
+

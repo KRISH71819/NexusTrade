@@ -210,6 +210,30 @@ def get_portfolio_history_collection_for_mode(mode: str = "paper"):
     return get_portfolio_history_collection()
 
 
+# ── V2 Collections (Phase 4) ──────────────────────────────────────────────────
+
+def get_v2_book_collection():
+    return get_db()["book"]
+
+def get_v2_book_trades_collection():
+    return get_db()["book_trades"]
+
+def get_v2_book_equity_collection():
+    return get_db()["book_equity"]
+
+def get_v2_incubator_shadow_collection():
+    return get_db()["incubator_shadow"]
+
+def get_v2_research_runs_collection():
+    return get_db()["research_runs"]
+
+def get_v2_regime_log_collection():
+    return get_db()["regime_log"]
+
+def get_v2_system_state_collection():
+    return get_db()["system_state_v2"]
+
+
 # ── Indexes ──────────────────────────────────────────────────────────────────
 
 async def _ensure_indexes():
@@ -238,7 +262,14 @@ async def _ensure_indexes():
     await db["meta_trades"].create_index([("timestamp", -1)])
     await db["meta_equity"].create_index([("timestamp", -1)])
 
-    logger.info("MongoDB indexes ensured (paper + live).")
+    # V2 collections indexes (Phase 4)
+    await db["book_trades"].create_index([("timestamp", -1), ("ticker", 1)])
+    await db["book_equity"].create_index("date", unique=True)
+    await db["incubator_shadow"].create_index("alpha_id")
+    await db["research_runs"].create_index("run_id")
+    await db["regime_log"].create_index("date", unique=True)
+
+    logger.info("MongoDB indexes ensured (paper + live + v2).")
 
 
 # ── Seed ─────────────────────────────────────────────────────────────────────

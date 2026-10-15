@@ -81,18 +81,27 @@ def is_running() -> bool:
 
 # ═══════════════════════════════ BATCH CORE ══════════════════════════════════
 
+DEFAULT_TICKERS = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+    "TATAMOTORS.NS", "SUNPHARMA.NS", "LT.NS", "SBIN.NS", "BAJFINANCE.NS",
+    "HINDALCO.NS", "MARUTI.NS",
+]
+DEFAULT_START = "2010-01-01"
+
+
 async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> dict:
     """
-    The actual research pipeline. Runs inside the worker thread's own event
-    loop (see run_scoped_evolution). Reuses generate_alphas.process_candidate
-    unchanged, whose only DB writes are alpha_registry inserts.
+    The V2 quantitative research pipeline. Runs inside the worker thread's
+    own event loop. Uses core.template_bank expressions, screens with structural
+    and Jev critics, backtests in sandbox, and promotes to Hall of Fame.
     """
     from database import connect_db, close_db, get_db
     from alpha_sandbox.sandbox import load_history_panel, backtest_signal
-    from alpha_sandbox.evaluator import compute_metrics
+    from alpha_sandbox.evaluator import compute_metrics, walk_forward_sharpes, apply_gates
     from alpha_sandbox import registry, hall_of_fame
-    from alpha_generator import generate_candidates
-    from generate_alphas import DEFAULT_TICKERS, DEFAULT_START, process_candidate
+    from core.template_bank import generate_candidate_expressions
+    from core.critics import check_structural_rejections, jev_critic_question, parse_critic_answer
+    from core.jev_adapter import JevAdapter
 
     await connect_db()
     try:
@@ -110,12 +119,13 @@ async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> di
                   f"benchmark buy&hold ({DEFAULT_START}+): ann {bench.get('ann_return_pct')}% "
                   f"sharpe {bench.get('sharpe')} maxDD {bench_dd}%")
 
-        memory = await registry.list_alphas(limit=12)
-        cands = generate_candidates(count, memory)  # blocking LLM call (isolated thread)
+        jev = JevAdapter()
+        all_cands = generate_candidate_expressions()
+        cands = all_cands[:count]
         proposed = len(cands)
         record["proposed"] = proposed
         record["candidates"] = []
-        _log_line(record, f"generator proposed {proposed} candidate(s)")
+        _log_line(record, f"V2 template bank proposed {proposed} candidate(s)")
 
         tested = 0
         for cand in cands:
@@ -124,50 +134,119 @@ async def _batch_coroutine(count: int, deadline_mono: float, record: dict) -> di
                 _log_line(record, f"time cap ({settings.evolution_time_cap_min} min) reached "
                                   f"— stopping after {tested} tested")
                 break
-            name = cand.get("name", "?")
-            try:
-                cand_res = await process_candidate(cand, panel, bench_dd)
-                tested += 1
-                record["tested"] = tested
-                if cand_res:
-                    record["candidates"].append(cand_res)
-                    met = cand_res.get("metrics") or {}
-                    sh = met.get("sharpe")
-                    if sh is not None:
-                        _log_line(record,
-                                  f"candidate '{name}': sharpe={sh} "
-                                  f"maxDD={met.get('max_dd_pct')}% "
-                                  f"turnover={met.get('ann_turnover')}x/yr")
-                    else:
-                        _log_line(record, f"candidate '{name}': rejected ({cand_res.get('verdict', 'REJECT')})")
-                else:
-                    record["candidates"].append({
-                        "name": name,
-                        "hypothesis": cand.get("hypothesis", ""),
-                        "expression": cand.get("expression", ""),
-                        "metrics": {
-                            "sharpe": None, "max_dd_pct": None, "ann_turnover": None,
-                            "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None
-                        },
-                        "gates": {"sharpe": False, "max_dd": False, "stability": False, "turnover": False, "all": False},
-                        "verdict": "REJECT",
-                    })
-                    _log_line(record, f"candidate '{name}': rejected pre/post-backtest")
-            except Exception as e:  # one bad candidate must never kill the batch
+
+            expr = cand.get("expression", "")
+            name = cand.get("name", "v2_alpha")
+            hypothesis = cand.get("hypothesis", "")
+
+            # 1. Structural Critic (Free, instant)
+            flaw = check_structural_rejections(expr)
+            if flaw:
+                _log_line(record, f"candidate '{name}': rejected by structural critic ({flaw})")
                 tested += 1
                 record["tested"] = tested
                 record["candidates"].append({
                     "name": name,
-                    "hypothesis": cand.get("hypothesis", ""),
-                    "expression": cand.get("expression", ""),
+                    "hypothesis": hypothesis,
+                    "expression": expr,
                     "metrics": {
                         "sharpe": None, "max_dd_pct": None, "ann_turnover": None,
-                        "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None
+                        "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None,
                     },
                     "gates": {"sharpe": False, "max_dd": False, "stability": False, "turnover": False, "all": False},
                     "verdict": "REJECT",
+                    "reject_reason": flaw,
                 })
-                _log_line(record, f"candidate '{name}' errored: {e}")
+                continue
+
+            # 2. Jev Adversarial Critic (fail-closed if explicit reject)
+            try:
+                q = jev_critic_question(expr, hypothesis)
+                critic_ans = await jev.query(state=expr, questions=q)
+                verdict = parse_critic_answer(critic_ans)
+                if verdict.get("verdict") == "REJECT":
+                    reason = verdict.get("fatal_flaw") or "Rejected by Jev critic"
+                    _log_line(record, f"candidate '{name}': rejected by Jev critic ({reason})")
+                    tested += 1
+                    record["tested"] = tested
+                    record["candidates"].append({
+                        "name": name,
+                        "hypothesis": hypothesis,
+                        "expression": expr,
+                        "metrics": {
+                            "sharpe": None, "max_dd_pct": None, "ann_turnover": None,
+                            "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None,
+                        },
+                        "gates": {"sharpe": False, "max_dd": False, "stability": False, "turnover": False, "all": False},
+                        "verdict": "REJECT",
+                        "reject_reason": reason,
+                    })
+                    continue
+            except Exception as e:
+                _log_line(record, f"candidate '{name}': Jev critic query skipped ({e})")
+
+            # 3. Pass to Sandbox & Gates
+            try:
+                portfolio_rule = cand.get("portfolio_rule", getattr(settings, "alpha_default_portfolio_rule", "top_n"))
+                daily_net, info = backtest_signal(
+                    panel, expr,
+                    portfolio_rule=portfolio_rule,
+                    top_n=settings.meta_top_n,
+                )
+                met = compute_metrics(daily_net)
+                folds = walk_forward_sharpes(daily_net, n_splits=3)
+                gates = apply_gates(met, folds, bench_dd)
+                verdict = "APPROVE" if gates.get("all") else "REJECT"
+
+                # Persist to registry
+                await registry.save_alpha_result(
+                    expr, f"v2_{name}",
+                    {"hypothesis": hypothesis, "bench_max_dd_pct": bench_dd},
+                    met, folds, gates, source="v2_template_bank",
+                )
+
+                # Check Hall of Fame promotion
+                if gates.get("all") and hall_of_fame.is_promotable({
+                    "name": f"v2_{name}", "expression": expr, "metrics": met, "gates": gates, "fold_sharpes": folds,
+                }):
+                    await hall_of_fame.promote_to_hall_of_fame(
+                        name=f"v2_{name}",
+                        expression=expr,
+                        hypothesis=hypothesis,
+                        metrics=met,
+                        source="v2_template_bank",
+                    )
+                    _log_line(record, f"PROMOTED candidate '{name}' to Hall of Fame!")
+
+                tested += 1
+                record["tested"] = tested
+                cand_res = {
+                    "name": name,
+                    "hypothesis": hypothesis,
+                    "expression": expr,
+                    "metrics": met,
+                    "gates": gates,
+                    "verdict": verdict,
+                }
+                record["candidates"].append(cand_res)
+                sh = met.get("sharpe")
+                _log_line(record, f"candidate '{name}': sharpe={sh} maxDD={met.get('max_dd_pct')}% turnover={met.get('ann_turnover')}x/yr verdict={verdict}")
+            except Exception as e:
+                tested += 1
+                record["tested"] = tested
+                record["candidates"].append({
+                    "name": name,
+                    "hypothesis": hypothesis,
+                    "expression": expr,
+                    "metrics": {
+                        "sharpe": None, "max_dd_pct": None, "ann_turnover": None,
+                        "fold_sharpes": [], "ann_return_pct": None, "ann_vol_pct": None,
+                    },
+                    "gates": {"sharpe": False, "max_dd": False, "stability": False, "turnover": False, "all": False},
+                    "verdict": "REJECT",
+                    "error": str(e),
+                })
+                _log_line(record, f"candidate '{name}' backtest errored: {e}")
 
         # Gate-pass tally from the registry (docs written during THIS batch).
         batch_started_utc = datetime.fromtimestamp(

@@ -44,6 +44,11 @@ async def load_history_panel(tickers: list, min_rows: int | None = None, start=N
         if df is None or len(df) < min_rows:
             logger.warning(f"{ticker}: insufficient history — skipped")
             continue
+        from data_sanitizer import clean_daily_bars
+        df = clean_daily_bars(df, ticker)
+        if len(df) < min_rows:
+            logger.warning(f"{ticker}: post-sanitization insufficient history — skipped")
+            continue
         panel[ticker] = df.reset_index(drop=True)
     return panel
 

@@ -6,11 +6,14 @@ from contextlib import asynccontextmanager
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import logging
 import sys
+from pymongo.errors import PyMongoError, ConnectionFailure, AutoReconnect
 
 from config import settings
-from database import connect_db, close_db
+from database import connect_db, close_db, ensure_connected
+from kill_switch import is_kill_switch_on
 from scheduler import start_scheduler, stop_scheduler, run_analysis_cycle
 
 # Configure logging
@@ -157,6 +160,7 @@ from routers import realtime  # noqa: E402
 from routers import llm_config  # noqa: E402
 from routers import meta  # noqa: E402
 from routers import research  # noqa: E402
+from routers import v2  # noqa: E402
 
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
 app.include_router(trades.router, prefix="/api", tags=["Trades"])
@@ -169,6 +173,27 @@ app.include_router(realtime.router, prefix="/api", tags=["Real-Time Feed"])
 app.include_router(llm_config.router, tags=["LLM Config"])
 app.include_router(meta.router, prefix="/api", tags=["Meta Research"])
 app.include_router(research.router, prefix="/api", tags=["Research"])
+app.include_router(v2.router, prefix="/api/v2")
+
+
+
+# ── Exception Handlers ───────────────────────────────────────────────────────
+
+@app.exception_handler(PyMongoError)
+async def mongo_exception_handler(request, exc):
+    """
+    Global catch-all for MongoDB disconnects.
+    Prevents 500 Internal Server Errors and returns a safe 503 JSON payload.
+    """
+    logger.warning(f"Global Mongo Error caught: {type(exc).__name__} - {str(exc)[:100]}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "status": "degraded",
+            "db_online": False,
+            "error": "Database temporarily unavailable or reconnecting"
+        },
+    )
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────
@@ -191,18 +216,28 @@ async def ping():
 
 @app.get("/api/health", tags=["System"])
 async def health_check():
-    """Full health check — safe to call but can be slow on cold start."""
-    # Wrap every external call so a cold-start DB delay never returns 503.
+    """Full health check — guaranteed to return 200/503 with honest db_online status."""
     kill_switch = False
     feed_connected = False
-    db_status = "unknown"
+    db_online = False
 
     try:
-        from kill_switch import is_kill_switch_on
         kill_switch = await is_kill_switch_on()
-        db_status = "ok"
-    except Exception as exc:
-        db_status = f"unavailable ({exc.__class__.__name__})"
+    except Exception:
+        try:
+            from kill_switch import is_kill_switch_on as _iks
+            kill_switch = await _iks()
+        except Exception:
+            pass
+
+    try:
+        db_online = await ensure_connected()
+    except Exception:
+        try:
+            from database import ensure_connected as _ec
+            db_online = await _ec()
+        except Exception:
+            pass
 
     try:
         from market_feed import is_feed_connected
@@ -211,16 +246,14 @@ async def health_check():
         pass
 
     return {
-        "status": "healthy",
+        "status": "healthy" if db_online else "degraded",
+        "db_online": db_online,
+        "kill_switch_active": kill_switch,
+        "realtime_feed": feed_connected,
         "service": "NexusTrade AI Agent",
-        "market": "NSE/BSE (India)",
         "trading_mode": settings.trading_mode,
         "legacy_engine_enabled": settings.legacy_engine_enabled,
         "meta_portfolio_enabled": settings.meta_portfolio_enabled,
-        "kill_switch_active": kill_switch,
-        "dhan_enabled": settings.dhan_trading_enabled,
-        "realtime_feed": feed_connected,
-        "db": db_status,
     }
 
 
