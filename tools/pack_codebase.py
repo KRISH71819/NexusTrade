@@ -42,6 +42,8 @@ EXCLUDE_FILES = {
     "BACKEND_CODEBASE.txt",
     "FULL_PROJECT_CODEBASE.md",
     "FULL_PROJECT_CODEBASE.txt",
+    "BACKEND_V2.md",
+    "FRONTEND_V2.md",
 }
 
 # Language mapping for markdown code fences
@@ -65,6 +67,8 @@ def should_include_path(path: Path) -> bool:
     for part in rel_parts:
         if part in EXCLUDE_DIRS or part.startswith(".pytest"):
             return False
+    if path.name == ".env" or (path.name.startswith(".env") and not path.name.endswith(".example")):
+        return False
     if path.name in EXCLUDE_FILES:
         return False
     if path.suffix in EXCLUDE_EXTS:

@@ -1,28 +1,18 @@
 """
-Scoped Alpha Evolution Driver (Section 3).
+Scoped Alpha Evolution Driver (V2 Quantitative Pipeline).
 
-Runs the offline research pipeline (alpha_generator -> alpha_critic ->
+Runs the offline research pipeline (core.template_bank -> core.critics ->
 alpha_sandbox -> hall_of_fame) inside hard limits:
   - max settings.evolution_max_candidates candidates per batch
   - wall-clock cap of settings.evolution_time_cap_min minutes
-  - universe: generate_alphas.DEFAULT_TICKERS (12 liquid majors)
-  - model order: generator's own compound-first fallback chain (unchanged)
+  - universe: DEFAULT_TICKERS (12 liquid majors)
+  - zero LLM hallucinations; pure math expressions with Jev adversarial screening
   - writes ONLY to alpha_registry / hall_of_fame collections — NEVER to the
     meta book or the legacy book
 
-Thread isolation matters: alpha_generator / alpha_critic make BLOCKING sync
-LLM calls (with time.sleep rate-limit spacing). The batch therefore runs in a
-worker thread with its own event loop via asyncio.to_thread + asyncio.run, so
-the main loop (risk checks, meta jobs, frontend broadcast) stays responsive
-even if a manual trigger lands during market hours.
-
-Timeout model: cooperative deadline checked between candidates; the outer
-asyncio.wait_for is belt-and-braces (a thread cannot be force-killed — if the
-inner deadline check is somehow missed, the abandoned result is logged and
-the run is marked timeout).
-
-Import-safe: heavy imports happen inside functions; importing this module
-performs no network or DB work.
+Isolation: Runs in a worker thread with its own event loop via
+asyncio.to_thread + asyncio.run, so the main loop (risk checks, meta jobs,
+frontend broadcast) stays responsive even if a manual trigger lands during market hours.
 """
 import asyncio
 import logging
