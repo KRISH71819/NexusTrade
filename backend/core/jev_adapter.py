@@ -22,7 +22,11 @@ HARD_MONTHLY_CAP_USD = 2.0
 class JevAdapter:
     def __init__(self, api_key: Optional[str] = None, timeout: float = 30.0,
                  max_retries: int = 3, backoff_start: float = 1.0):
-        self.api_key = api_key if api_key is not None else os.environ.get("JEVMODEL_API_KEY", "")
+        if api_key is not None:
+            self.api_key = api_key
+        else:
+            from config import settings
+            self.api_key = os.environ.get("JEVMODEL_API_KEY") or getattr(settings, "jevmodel_api_key", "")
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff = backoff_start

@@ -98,6 +98,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Dhan not configured — paper-only mode")
 
+    from core.jev_adapter import JevAdapter
+    jev = JevAdapter()
+    if jev.is_configured:
+        logger.info("Jev bounded decision engine online")
+    else:
+        logger.info("Jev not configured — code-only")
+
     start_scheduler()
     if settings.run_analysis_on_startup and settings.legacy_engine_enabled:
         asyncio.create_task(_run_startup_analysis())

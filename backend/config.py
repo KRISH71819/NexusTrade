@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db_name: str = "paper_trader"
 
+    # ── V2 Bounded Decision AI (Jev SystemOne) ────────────────────────
+    jevmodel_api_key: str = ""
+
     # ── Google Gemini (REVIEWER + FALLBACK ANALYST) ────────────────────
     gemini_api_key: str = ""
     gemini_model: str = "gemma-4-31b-it"
