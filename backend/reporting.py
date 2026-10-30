@@ -1,5 +1,5 @@
 """
-Daily one-page report and weekly summary (System A).
+Daily one-page report and weekly summary.
 
 Emits once per day (post-close, 15:35 IST) to:
   - Python logger (INFO level — always)
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _get_legacy_status_line() -> str:
-    """ONE-line System A summary: open positions count + risk state."""
+    """ONE-line portfolio summary: open positions count + risk state."""
     try:
         from config import settings
         from ledger import get_portfolio_for_mode, get_daily_pnl_pct
@@ -38,8 +38,7 @@ async def _get_legacy_status_line() -> str:
         except Exception:
             pass
 
-        tag = "" if settings.legacy_engine_enabled else " [FROZEN]"
-        return f"{n_pos} open position(s) | day {daily_pnl:+.2%} | risk={risk}{tag}"
+        return f"{n_pos} open position(s) | day {daily_pnl:+.2%} | risk={risk}"
     except Exception as e:
         logger.warning(f"Portfolio status line failed: {e}")
         return "unavailable"
@@ -51,7 +50,7 @@ async def _get_legacy_status_line() -> str:
 
 async def generate_daily_report() -> str:
     """
-    Generate and emit the daily one-page report for System A.
+    Generate and emit the daily one-page report.
     Returns the report string (also logged + sent to Telegram).
     """
     from config import settings
@@ -67,7 +66,7 @@ async def generate_daily_report() -> str:
         f"  DAILY REPORT — {today_str}  (mode={settings.trading_mode})",
         f"{'=' * 56}",
         "",
-        "── SYSTEM A PORTFOLIO ──────────────────────────────",
+        "── PORTFOLIO STATUS ────────────────────────────────",
         f"  {legacy_line}",
         f"  Kill switch: {'ON  ⛔ (manual clear required)' if kill_switch_on else 'OFF ✅'}",
         f"{'=' * 56}",
@@ -115,7 +114,7 @@ async def build_weekly_summary(send_to_telegram: bool = True) -> str:
     """
     Weekly summary:
       - Hall-of-Fame count + any new additions this week
-      - System A status (positions, risk)
+      - Portfolio status (positions, risk)
       - LLM/Gemma daily-budget usage
     Returns the text; the scheduler logs it and this sends it to Telegram.
     """
@@ -157,7 +156,7 @@ async def build_weekly_summary(send_to_telegram: bool = True) -> str:
     lines = [
         f"📅 Weekly Summary — {today_str}",
         f"🔬 {hof_note}",
-        f"🧊 System A: {legacy_line}",
+        f"💼 Portfolio: {legacy_line}",
     ]
     if llm_note:
         lines.append(f"🤖 {llm_note}")

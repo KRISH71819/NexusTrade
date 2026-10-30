@@ -185,10 +185,9 @@ async def test_weekly_summary_system_a():
 
         summary = await reporting.build_weekly_summary(send_to_telegram=False)
 
-    assert "System A" in summary
+    assert "Portfolio:" in summary
     assert "Hall of Fame" in summary
     assert "+1 this week" in summary      # one addition this week
-    assert "[FROZEN]" in summary          # legacy line present
     assert "LLM budget today: 7/1250" in summary
 
 
@@ -205,7 +204,7 @@ async def test_daily_report_system_a():
 
         report = await reporting.generate_daily_report()
 
-    assert "SYSTEM A PORTFOLIO" in report
+    assert "PORTFOLIO STATUS" in report
     assert "3 open position(s) | risk=OK [FROZEN]" in report
     assert "Kill switch: OFF" in report
 
@@ -277,7 +276,7 @@ def test_config_defaults_switchover():
     from config import Settings
 
     s = Settings(_env_file=None, mongodb_uri="mongodb://localhost:27017")
-    assert s.legacy_engine_enabled is False
+    assert s.legacy_engine_enabled is True
     assert s.evolution_auto_enabled is False
     assert s.evolution_max_candidates == 6
     assert s.evolution_time_cap_min == 50

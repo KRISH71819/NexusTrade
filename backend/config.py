@@ -215,11 +215,10 @@ class Settings(BaseSettings):
     # ── Trading Mode ─────────────────────────────────────────────────
     trading_mode: str = "paper"  # "paper" or "live"
 
-    # ── Legacy Engine (System A) freeze switch ───────────────────────
-    # When False: hourly LLM analysis cycle, manual analyze trigger and the
-    # Dhan WebSocket feed are skipped. The 30-min rule-based risk check stays
-    # ON to protect legacy positions (yfinance polling fallback).
-    legacy_engine_enabled: bool = False
+    # ── Autonomous Trading Engine Switch ─────────────────────────────
+    # When True: hourly LLM analysis cycle, manual analyze trigger, and
+    # Dhan WebSocket feed run actively.
+    legacy_engine_enabled: bool = True
 
     # ── Global Kill Switch ───────────────────────────────────────────
     kill_switch_enabled: bool = False  # When True: no new BUYs, only SELLs

@@ -5,14 +5,7 @@ import { api } from '../api';
 
 export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAnalysis, onRefreshMarket, isBusy, timeframe, onTimeframeChange, view = 'chart', onViewChange }) {
   const location = useLocation();
-  const [legacyFrozen, setLegacyFrozen] = useState(true);
 
-  // The Analyze button drives the LEGACY engine — hide it while frozen.
-  useEffect(() => {
-    api.health()
-      .then((h) => setLegacyFrozen(!h?.legacy_engine_enabled))
-      .catch(() => {});
-  }, [location.pathname]);
   
   return (
     <div className="topnav">
@@ -78,8 +71,7 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
       </div>
 
       <div className="topnav-section">
-        {/* Run Analysis Button — legacy engine; hidden while frozen */}
-        {!legacyFrozen && (
+        {/* Run Analysis Button */}
           <button 
             className="top-btn" 
             title="Run Analysis" 
@@ -91,7 +83,6 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
             <Activity size={16} color="var(--accent)" />
             <span style={{ fontSize: '12px', fontWeight: 600 }}>Analyze</span>
           </button>
-        )}
 
         {/* Refresh Market Button */}
         <button 
