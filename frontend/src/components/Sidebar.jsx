@@ -14,9 +14,8 @@ import { useApp } from "../context/AppContext";
 import { api } from "../api";
 
 const navItems = [
-  { to: "/", icon: TrendingUp, label: "System B", end: true },
+  { to: "/", icon: LayoutDashboard, label: "Dashboard", end: true },
   { to: "/analysis", icon: CandlestickChart, label: "Chart" },
-  { to: "/legacy", icon: LayoutDashboard, label: "Legacy (frozen)" },
   { to: "/portfolio", icon: Briefcase, label: "Portfolio" },
   { to: "/news", icon: Newspaper, label: "News" },
   { to: "/trades", icon: ClipboardList, label: "History" },

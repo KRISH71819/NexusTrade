@@ -182,22 +182,6 @@ class Settings(BaseSettings):
     alpha_max_conjunction_conditions: int = 3 # maximum AND-conjoined conditions before structural rejection
     alpha_default_portfolio_rule: str = "top_n" # default sandbox portfolio construction mode ("top_n" or "sign")
 
-    # ── Meta Research Portfolio — validated config (Phase 12) ─────────
-    meta_portfolio_enabled: bool = True         # master switch (System B active)
-    meta_signal_expr: str = "close / sma(close, 200) - 1"  # trend_200 cross-sectional rank
-    meta_top_n: int = 25
-    meta_rebalance_days: int = 60
-    meta_initial_capital: float = 1_000_000.0
-    meta_max_dd_halt: float = 0.25              # halt buys if meta equity 25% below peak
-    meta_use_trend_overlay: bool = True
-    meta_trend_window: int = 200
-    meta_use_vol_target: bool = True
-    meta_target_ann_vol: float = 0.15
-    meta_vol_floor: float = 0.25
-    meta_vol_cap: float = 1.0
-    meta_min_exposure: float = 0.25
-    meta_max_exposure: float = 1.0
-
     @field_validator("watchlist", mode="before")
     @classmethod
     def parse_watchlist(cls, v):
@@ -234,8 +218,7 @@ class Settings(BaseSettings):
     # ── Legacy Engine (System A) freeze switch ───────────────────────
     # When False: hourly LLM analysis cycle, manual analyze trigger and the
     # Dhan WebSocket feed are skipped. The 30-min rule-based risk check stays
-    # ON to protect legacy positions (yfinance polling fallback). System B
-    # (meta portfolio) is unaffected by this flag.
+    # ON to protect legacy positions (yfinance polling fallback).
     legacy_engine_enabled: bool = False
 
     # ── Global Kill Switch ───────────────────────────────────────────

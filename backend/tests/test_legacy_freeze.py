@@ -167,41 +167,12 @@ def _fake_coll(find_docs=None, one_doc=None):
 
 
 @pytest.mark.asyncio
-async def test_weekly_summary_contains_meta_numbers():
+async def test_weekly_summary_system_a():
     import reporting
 
-    meta_doc = {
-        "_id": "meta",
-        "total_value": 1_100_000.0,
-        "cash": 100_000.0,
-        "holdings_value": 1_000_000.0,
-        "holdings": [
-            {"ticker": "A.NS", "quantity": 10, "avg_price": 100.0,
-             "current_price": 110.0, "market_value": 500_000.0},
-            {"ticker": "B.NS", "quantity": 10, "avg_price": 100.0,
-             "current_price": 110.0, "market_value": 500_000.0},
-        ],
-        "strat_info": {"vol_scale": 0.8, "exposure": 0.7, "trend_on": True},
-        "reconciliation": {"target_exposure": 0.7, "names_target": 25},
-        "last_rebalance": "2026-08-20",
-        "peak_value": 1_100_000.0,
-    }
-    equity_docs = [
-        {"date": "2026-08-15", "timestamp": "2026-08-15T10:00:00+00:00",
-         "total_value": 1_000_000.0},
-        {"date": "2026-08-21", "timestamp": "2026-08-21T10:00:00+00:00",
-         "total_value": 1_050_000.0},
-        {"date": "2026-08-22", "timestamp": "2026-08-22T10:00:00+00:00",
-         "total_value": 1_100_000.0},
-    ]
-
-    meta_coll = _fake_coll(find_docs=[], one_doc=meta_doc)
-    eq_coll = _fake_coll(find_docs=equity_docs, one_doc=None)
     recent_promo = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 
-    with patch("database.get_meta_portfolio_collection", return_value=meta_coll), \
-         patch("database.get_meta_equity_collection", return_value=eq_coll), \
-         patch("alpha_sandbox.hall_of_fame.list_hall_of_fame",
+    with patch("alpha_sandbox.hall_of_fame.list_hall_of_fame",
                new_callable=AsyncMock, return_value=[
                    {"name": "hof_alpha_1", "promoted_at": recent_promo},
                ]), \
@@ -214,9 +185,7 @@ async def test_weekly_summary_contains_meta_numbers():
 
         summary = await reporting.build_weekly_summary(send_to_telegram=False)
 
-    assert "System B" in summary
-    assert "Rs.1,100,000" in summary or "Rs.1.1" in summary
-    assert "+100,000" in summary          # weekly P&L vs oldest-in-window snapshot
+    assert "System A" in summary
     assert "Hall of Fame" in summary
     assert "+1 this week" in summary      # one addition this week
     assert "[FROZEN]" in summary          # legacy line present
@@ -224,14 +193,10 @@ async def test_weekly_summary_contains_meta_numbers():
 
 
 @pytest.mark.asyncio
-async def test_daily_report_meta_primary_and_one_legacy_line():
+async def test_daily_report_system_a():
     import reporting
 
-    with patch.object(reporting, "_get_meta_primary_lines",
-                      new_callable=AsyncMock, return_value=[
-                          "  Value: Rs.   1,100,000.00  (+10.00% since inception)",
-                      ]), \
-         patch.object(reporting, "_get_legacy_status_line",
+    with patch.object(reporting, "_get_legacy_status_line",
                       new_callable=AsyncMock,
                       return_value="3 open position(s) | risk=OK [FROZEN]"), \
          patch("kill_switch.is_kill_switch_on",
@@ -240,18 +205,9 @@ async def test_daily_report_meta_primary_and_one_legacy_line():
 
         report = await reporting.generate_daily_report()
 
-    assert "SYSTEM B — META RESEARCH PORTFOLIO" in report
-    assert "LEGACY (SYSTEM A)" in report
-    # Legacy section is exactly ONE status line + kill switch line
-    # (separator rules excluded).
-    legacy_block = report.split("LEGACY (SYSTEM A)")[1]
-    content_lines = [
-        l for l in legacy_block.strip().splitlines()
-        if l.strip()
-        and not l.strip().startswith("==")
-        and not l.strip().startswith("─")
-    ]
-    assert len(content_lines) == 2
+    assert "SYSTEM A PORTFOLIO" in report
+    assert "3 open position(s) | risk=OK [FROZEN]" in report
+    assert "Kill switch: OFF" in report
 
 
 # ── (f) Research trigger clamp + Saturday gating ─────────────────────────────
@@ -292,8 +248,7 @@ async def test_research_trigger_rejects_concurrent_run():
 async def test_saturday_job_gated_by_auto_flag():
     import scheduler
 
-    with patch.object(scheduler.settings, "evolution_auto_enabled", False), \
-         patch.object(scheduler.settings, "meta_portfolio_enabled", True):
+    with patch.object(scheduler.settings, "evolution_auto_enabled", False):
         sched = scheduler.start_scheduler()
         try:
             ids = [j.id for j in sched.get_jobs()]
@@ -302,16 +257,13 @@ async def test_saturday_job_gated_by_auto_flag():
 
     assert "saturday_evolution" not in ids
     assert "sunday_weekly_summary" in ids
-    assert "meta_mtm" in ids
-    assert "meta_rebalance" in ids
 
 
 @pytest.mark.asyncio
 async def test_saturday_job_registered_when_auto_enabled():
     import scheduler
 
-    with patch.object(scheduler.settings, "evolution_auto_enabled", True), \
-         patch.object(scheduler.settings, "meta_portfolio_enabled", True):
+    with patch.object(scheduler.settings, "evolution_auto_enabled", True):
         sched = scheduler.start_scheduler()
         try:
             ids = [j.id for j in sched.get_jobs()]
@@ -324,8 +276,7 @@ async def test_saturday_job_registered_when_auto_enabled():
 def test_config_defaults_switchover():
     from config import Settings
 
-    s = Settings(mongodb_uri="mongodb://localhost:27017")
-    assert s.meta_portfolio_enabled is True
+    s = Settings(_env_file=None, mongodb_uri="mongodb://localhost:27017")
     assert s.legacy_engine_enabled is False
     assert s.evolution_auto_enabled is False
     assert s.evolution_max_candidates == 6

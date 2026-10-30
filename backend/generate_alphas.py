@@ -137,8 +137,8 @@ async def process_candidate(cand: dict, panel: dict, bench_dd: float) -> dict | 
     daily_net, info = backtest_signal(
         panel, cand["expression"],
         portfolio_rule=portfolio_rule,
-        top_n=settings.meta_top_n,
-        rebalance_days=settings.meta_rebalance_days,
+        top_n=25,
+        rebalance_days=60,
         cadence_days=int(cand.get("cadence_days", settings.alpha_default_cadence)),
         min_hold_days=int(cand.get("min_hold_days", settings.alpha_default_min_hold)),
     )

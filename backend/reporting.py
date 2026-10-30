@@ -1,22 +1,9 @@
 """
-Daily one-page report (Section 3 — System B switchover).
+Daily one-page report and weekly summary (System A).
 
 Emits once per day (post-close, 15:35 IST) to:
   - Python logger (INFO level — always)
   - Telegram (if configured)
-
-Report layout (META-primary):
-  1. SYSTEM B — meta research portfolio: value, daily P&L, exposure vs target,
-     vol scale, holdings count, next rebalance countdown
-  2. ONE line of legacy summary (open positions count + risk status)
-
-Also provides build_weekly_summary() for the Sunday 18:00 IST job:
-meta weekly P&L / exposure / vol scale, Hall-of-Fame count + new additions,
-legacy book status, and LLM daily-budget usage.
-
-Hard constraints honoured:
-  - trading_mode stays "paper", dhan_trading_enabled stays False
-  - No remote push; runs in the same process as the scheduler
 """
 
 from __future__ import annotations
@@ -27,75 +14,8 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#   SYSTEM B — META PRIMARY BLOCK (daily report)
-# ═══════════════════════════════════════════════════════════════════════════
-
-async def _get_meta_primary_lines() -> list:
-    """
-    SYSTEM B primary block for the daily report: value, since-inception %,
-    daily P&L, exposure vs target, vol scale, holdings count, next rebalance.
-    Returns [] when the meta book does not exist yet.
-    """
-    try:
-        from config import settings
-        from market_time import ist_today_str
-        from database import (
-            get_meta_portfolio_collection,
-            get_meta_equity_collection,
-        )
-        from routers.meta import next_rebalance_info, pnl_vs_history
-
-        doc = await get_meta_portfolio_collection().find_one({"_id": "meta"}, {"_id": 0})
-        if not doc:
-            return []
-
-        total = float(doc.get("total_value", 0.0) or 0.0)
-        initial = float(settings.meta_initial_capital or 0.0)
-        since = (total / initial - 1.0) if initial > 0 else 0.0
-
-        eq_docs = await get_meta_equity_collection().find(
-            {}, {"_id": 0, "date": 1, "timestamp": 1, "total_value": 1}
-        ).sort("timestamp", 1).to_list(length=1000)
-        pnl = pnl_vs_history(eq_docs, total)
-
-        strat = doc.get("strat_info") or {}
-        recon = doc.get("reconciliation") or {}
-        hv = float(doc.get("holdings_value", 0.0) or 0.0) or sum(
-            h.get("market_value", 0) for h in doc.get("holdings", [])
-        )
-        ex_actual = (hv / total) if total > 0 else 0.0
-
-        target = recon.get("target_exposure")
-        if target is None:
-            target = strat.get("exposure")
-        target_txt = f"{target:.0%}" if isinstance(target, (int, float)) else "?"
-
-        vs = strat.get("vol_scale")
-        vs_txt = f"x{vs}" if isinstance(vs, (int, float)) else "?"
-        trend_note = "" if strat.get("trend_on") in (True, None) else " | TREND OVERLAY OFF"
-
-        n_hold = len([h for h in doc.get("holdings", []) if h.get("quantity", 0) > 0])
-        rb = next_rebalance_info(
-            doc.get("last_rebalance"), settings.meta_rebalance_days, ist_today_str()
-        )
-
-        return [
-            f"  Value: Rs.{total:>12,.2f}  ({since:+.2%} since inception)",
-            f"  Day P&L: {pnl['daily_pnl']:+,.2f} ({pnl['daily_pnl_pct']:+.2%})",
-            f"  Exposure: {ex_actual:.0%} (target {target_txt}) "
-            f"| Vol scale: {vs_txt}{trend_note}",
-            f"  Holdings: {n_hold}/{recon.get('names_target', '?')} | "
-            f"Next rebalance: {rb.get('next_rebalance_date') or 'n/a'} "
-            f"(in {rb.get('days_until_rebalance', '?')}d)",
-        ]
-    except Exception as e:
-        logger.warning(f"Meta primary report section failed: {e}")
-        return []
-
-
 async def _get_legacy_status_line() -> str:
-    """ONE-line legacy summary: open positions count + risk state."""
+    """ONE-line System A summary: open positions count + risk state."""
     try:
         from config import settings
         from ledger import get_portfolio_for_mode, get_daily_pnl_pct
@@ -121,7 +41,7 @@ async def _get_legacy_status_line() -> str:
         tag = "" if settings.legacy_engine_enabled else " [FROZEN]"
         return f"{n_pos} open position(s) | day {daily_pnl:+.2%} | risk={risk}{tag}"
     except Exception as e:
-        logger.warning(f"Legacy status line failed: {e}")
+        logger.warning(f"Portfolio status line failed: {e}")
         return "unavailable"
 
 
@@ -131,7 +51,7 @@ async def _get_legacy_status_line() -> str:
 
 async def generate_daily_report() -> str:
     """
-    Generate and emit the daily one-page report (META-primary, Section 3.1).
+    Generate and emit the daily one-page report for System A.
     Returns the report string (also logged + sent to Telegram).
     """
     from config import settings
@@ -140,8 +60,6 @@ async def generate_daily_report() -> str:
 
     today_str = ist_today_str()
     kill_switch_on = await is_kill_switch_on()
-
-    meta_lines = await _get_meta_primary_lines()
     legacy_line = await _get_legacy_status_line()
 
     lines = [
@@ -149,15 +67,7 @@ async def generate_daily_report() -> str:
         f"  DAILY REPORT — {today_str}  (mode={settings.trading_mode})",
         f"{'=' * 56}",
         "",
-        "── SYSTEM B — META RESEARCH PORTFOLIO ──────────────",
-    ]
-    lines += meta_lines if meta_lines else [
-        "  Meta book unavailable (not seeded yet)."
-    ]
-
-    lines += [
-        "",
-        "── LEGACY (SYSTEM A) ───────────────────────────────",
+        "── SYSTEM A PORTFOLIO ──────────────────────────────",
         f"  {legacy_line}",
         f"  Kill switch: {'ON  ⛔ (manual clear required)' if kill_switch_on else 'OFF ✅'}",
         f"{'=' * 56}",
@@ -170,10 +80,11 @@ async def generate_daily_report() -> str:
 
     try:
         from telegram_bot import send_message
-        tg_lines = [f"📊 *Daily Report — {today_str}*"]
-        tg_lines += [ln.strip() for ln in meta_lines]
-        tg_lines.append(f"🧊 Legacy: {legacy_line}")
-        tg_lines.append(f"🔴 Kill switch: {'ON ⛔' if kill_switch_on else 'OFF ✅'}")
+        tg_lines = [
+            f"📊 *Daily Report — {today_str}*",
+            f"💼 Portfolio: {legacy_line}",
+            f"🔴 Kill switch: {'ON ⛔' if kill_switch_on else 'OFF ✅'}",
+        ]
         import asyncio
         asyncio.create_task(send_message("\n".join(tg_lines)))
     except Exception as e:
@@ -183,7 +94,7 @@ async def generate_daily_report() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#   WEEKLY SUMMARY (Sunday 18:00 IST job — Section 3.3)
+#   WEEKLY SUMMARY (Sunday 18:00 IST job)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _as_naive_utc(value) -> datetime | None:
@@ -202,57 +113,15 @@ def _as_naive_utc(value) -> datetime | None:
 
 async def build_weekly_summary(send_to_telegram: bool = True) -> str:
     """
-    Weekly summary (Section 3.3):
-      - meta book weekly P&L, exposure, vol scale
+    Weekly summary:
       - Hall-of-Fame count + any new additions this week
-      - legacy book status (positions, risk)
+      - System A status (positions, risk)
       - LLM/Gemma daily-budget usage
     Returns the text; the scheduler logs it and this sends it to Telegram.
     """
-    from config import settings
     from market_time import ist_today_str
-    from database import (
-        get_meta_portfolio_collection,
-        get_meta_equity_collection,
-    )
-    from routers.meta import next_rebalance_info, pnl_vs_history
 
     today_str = ist_today_str()
-
-    # ── SYSTEM B ─────────────────────────────────────────────────────────
-    meta_note = "System B: unavailable"
-    try:
-        doc = await get_meta_portfolio_collection().find_one({"_id": "meta"}, {"_id": 0})
-        if doc:
-            total = float(doc.get("total_value", 0.0) or 0.0)
-            initial = float(settings.meta_initial_capital or 0.0)
-            since = (total / initial - 1.0) if initial > 0 else 0.0
-            eq_docs = await get_meta_equity_collection().find(
-                {}, {"_id": 0, "date": 1, "timestamp": 1, "total_value": 1}
-            ).sort("timestamp", 1).to_list(length=1000)
-            pnl = pnl_vs_history(eq_docs, total)
-            strat = doc.get("strat_info") or {}
-            recon = doc.get("reconciliation") or {}
-            hv = float(doc.get("holdings_value", 0.0) or 0.0)
-            ex_actual = (hv / total) if total > 0 else 0.0
-            target = recon.get("target_exposure")
-            if target is None:
-                target = strat.get("exposure")
-            n_hold = len([h for h in doc.get("holdings", [])
-                          if h.get("quantity", 0) > 0])
-            rb = next_rebalance_info(doc.get("last_rebalance"),
-                                     settings.meta_rebalance_days, today_str)
-            vs = strat.get("vol_scale")
-            target_txt = f"{target:.0%}" if isinstance(target, (int, float)) else "?"
-            vs_txt = f"x{vs}" if isinstance(vs, (int, float)) else "?"
-            meta_note = (
-                f"*System B:* Rs.{total:,.0f} ({since:+.1%} inception) | Week P&L "
-                f"*{pnl['weekly_pnl']:+,.0f}* ({pnl['weekly_pnl_pct']:+.2%})\n"
-                f"Exposure {ex_actual:.0%}/{target_txt} | Vol {vs_txt} | "
-                f"Holdings {n_hold} | Rebalance in {rb.get('days_until_rebalance', '?')}d"
-            )
-    except Exception as e:
-        logger.warning(f"Weekly summary meta block failed: {e}")
 
     # ── Research / Hall of Fame ──────────────────────────────────────────
     hof_note = "Hall of Fame: unavailable"
@@ -287,9 +156,8 @@ async def build_weekly_summary(send_to_telegram: bool = True) -> str:
 
     lines = [
         f"📅 Weekly Summary — {today_str}",
-        meta_note,
         f"🔬 {hof_note}",
-        f"🧊 Legacy: {legacy_line}",
+        f"🧊 System A: {legacy_line}",
     ]
     if llm_note:
         lines.append(f"🤖 {llm_note}")

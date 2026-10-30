@@ -110,9 +110,9 @@ export default function TopNav({ currentSymbol = "AAPL", onSymbolChange, onRunAn
         
         {/* Action icons */}
         <Link 
-          to="/legacy" 
-          className={`top-btn ${location.pathname === '/legacy' ? 'active' : ''}`} 
-          title="Legacy (frozen) — System A" 
+          to="/" 
+          className={`top-btn ${location.pathname === '/' || location.pathname === '/dashboard' ? 'active' : ''}`} 
+          title="Dashboard" 
           style={{ display: 'grid', placeItems: 'center', color: 'inherit' }}
         >
           <LayoutDashboard size={18} />

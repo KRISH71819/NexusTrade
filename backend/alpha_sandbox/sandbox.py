@@ -165,9 +165,9 @@ def backtest_signal(
         }
         return daily_net, info
 
-    # ── mode="top_n" (identical construction to incumbent live meta book) ─────
-    top_n_val = top_n if top_n is not None else settings.meta_top_n
-    rb_days = rebalance_days if rebalance_days is not None else settings.meta_rebalance_days
+    # ── mode="top_n" ──────────────────────────────────────────────────────────
+    top_n_val = top_n if top_n is not None else 25
+    rb_days = rebalance_days if rebalance_days is not None else 60
 
     signal_frames, close_frames = {}, {}
     clipped_outliers = 0
@@ -208,7 +208,7 @@ def backtest_signal(
     if use_vol_target:
         daily_comp_ret = composite.pct_change()
         rv = daily_comp_ret.rolling(120, min_periods=min(60, n)).std(ddof=1) * np.sqrt(252)
-        vs = (target_ann_vol / rv).clip(settings.meta_vol_floor, settings.meta_vol_cap).fillna(1.0)
+        vs = (target_ann_vol / rv).clip(0.25, 1.0).fillna(1.0)
     else:
         vs = pd.Series(1.0, index=close_df.index)
 

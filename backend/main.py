@@ -155,7 +155,6 @@ app.add_middleware(
 from routers import portfolio, trades, analysis, market, news, analytics, trading_mode  # noqa: E402
 from routers import realtime  # noqa: E402
 from routers import llm_config  # noqa: E402
-from routers import meta  # noqa: E402
 from routers import research  # noqa: E402
 
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
@@ -167,7 +166,6 @@ app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(trading_mode.router, prefix="/api", tags=["Trading Mode"])
 app.include_router(realtime.router, prefix="/api", tags=["Real-Time Feed"])
 app.include_router(llm_config.router, tags=["LLM Config"])
-app.include_router(meta.router, prefix="/api", tags=["Meta Research"])
 app.include_router(research.router, prefix="/api", tags=["Research"])
 
 
@@ -216,7 +214,6 @@ async def health_check():
         "market": "NSE/BSE (India)",
         "trading_mode": settings.trading_mode,
         "legacy_engine_enabled": settings.legacy_engine_enabled,
-        "meta_portfolio_enabled": settings.meta_portfolio_enabled,
         "kill_switch_active": kill_switch,
         "dhan_enabled": settings.dhan_trading_enabled,
         "realtime_feed": feed_connected,
